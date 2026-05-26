@@ -1,9 +1,0 @@
-go 1.25.0
-
-use (
-	./cmd/eventbus-demo
-	./pkg/eventbus
-	./pkg/idempotency
-	./services/auth
-	./services/feed
-)

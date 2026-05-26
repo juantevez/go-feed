@@ -1,0 +1,34 @@
+# Git
+.git
+.gitignore
+
+# IDE / Editor
+.idea
+.vscode
+*.swp
+*.swo
+
+# Logs / Temp
+*.log
+tmp/
+temp/
+
+# Build artifacts (pero NO go.mod/go.sum/go.work)
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test data
+testdata/
+
+# Docker (pero incluir Dockerfiles necesarios)
+!cmd/*/Dockerfile
+!docker-compose.yml
+
+# Node / Python / Otros (si no los usas, puedes quitar)
+node_modules/
+__pycache__/
+*.pyc
