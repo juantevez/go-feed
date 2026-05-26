@@ -1,0 +1,536 @@
+openapi: 3.0.3
+info:
+  title: Feed Backend API
+  version: 1.0.0
+  description: |
+    API para sistema de feed tipo Instagram con arquitectura Publisher/Subscriber.
+    Soporta autenticación JWT, paginación basada en cursor, operaciones idempotentes
+    y entrega de notificaciones en tiempo real.
+  contact:
+    name: Backend Team
+    email: backend@feed.local
+
+servers:
+  - url: http://localhost:8080
+    description: Gateway de Desarrollo Local
+  - url: https://api.feed.local
+    description: Entorno de Producción
+
+tags:
+  - name: Auth
+    description: Registro, login y gestión de tokens
+  - name: Users
+    description: Perfiles y grafo de seguidores
+  - name: Content
+    description: Creación y consulta de publicaciones
+  - name: Feed
+    description: Timeline principal y descubrimiento
+  - name: Interactions
+    description: Likes, comentarios y compartidos
+  - name: Notifications
+    description: Alertas y bandeja de entrada
+
+paths:
+  # ─────────────────────────────────────────────────────────────
+  # AUTH
+  # ─────────────────────────────────────────────────────────────
+  /auth/register:
+    post:
+      tags: [Auth]
+      summary: Registrar nuevo usuario
+      operationId: registerUser
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+      responses:
+        '201':
+          description: Usuario creado exitosamente
+          headers:
+            Idempotent:
+              schema: { type: boolean }
+              description: true si la respuesta fue servida desde caché idempotente
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '409': { $ref: '#/components/responses/ConflictError' }
+
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Autenticar usuario
+      operationId: loginUser
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Tokens emitidos
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+        '401': { $ref: '#/components/responses/UnauthorizedError' }
+
+  /auth/refresh:
+    post:
+      tags: [Auth]
+      summary: Rotar access token
+      operationId: refreshToken
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refresh_token]
+              properties:
+                refresh_token:
+                  type: string
+                  format: jwt
+      responses:
+        '200':
+          description: Nuevo access token
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  access_token: { type: string }
+                  expires_in: { type: integer, format: int64 }
+        '401': { $ref: '#/components/responses/UnauthorizedError' }
+
+  # ─────────────────────────────────────────────────────────────
+  # USERS
+  # ─────────────────────────────────────────────────────────────
+  /users/{user_id}:
+    get:
+      tags: [Users]
+      summary: Obtener perfil público
+      operationId: getUserProfile
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Perfil del usuario
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserProfile'
+        '404': { $ref: '#/components/responses/NotFoundError' }
+
+  /users/{user_id}/follow:
+    post:
+      tags: [Users]
+      summary: Seguir usuario
+      operationId: followUser
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Relación creada
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  following: { type: boolean, example: true }
+                  mutual: { type: boolean }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '404': { $ref: '#/components/responses/NotFoundError' }
+        '409':
+          description: Ya sigues a este usuario
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+
+    delete:
+      tags: [Users]
+      summary: Dejar de seguir
+      operationId: unfollowUser
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      security:
+        - BearerAuth: []
+      responses:
+        '200': { description: Relación eliminada }
+        '404': { $ref: '#/components/responses/NotFoundError' }
+
+  # ─────────────────────────────────────────────────────────────
+  # CONTENT
+  # ─────────────────────────────────────────────────────────────
+  /posts:
+    post:
+      tags: [Content]
+      summary: Crear publicación
+      operationId: createPost
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreatePostRequest'
+      responses:
+        '201':
+          description: Post creado
+          headers:
+            Location: { schema: { type: string }, description: URL del recurso }
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  post_id: { type: string, format: uuid }
+                  status: { type: string, enum: [published, processing] }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/UnauthorizedError' }
+        '409': { $ref: '#/components/responses/IdempotentConflict' }
+
+  /posts/{post_id}:
+    get:
+      tags: [Content]
+      summary: Detalle de publicación
+      operationId: getPost
+      parameters:
+        - name: post_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Post con métricas y autor
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PostDetail'
+        '404': { $ref: '#/components/responses/NotFoundError' }
+
+  # ─────────────────────────────────────────────────────────────
+  # FEED
+  # ─────────────────────────────────────────────────────────────
+  /feed:
+    get:
+      tags: [Feed]
+      summary: Obtener timeline principal
+      operationId: getFeed
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Lista de posts paginada
+          headers:
+            X-Next-Cursor:
+              schema: { type: string }
+              description: Cursor para la siguiente página
+            Cache-Control:
+              schema: { type: string, example: "max-age=30, stale-while-revalidate=60" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [entries]
+                properties:
+                  entries:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/FeedEntry'
+                  next_cursor:
+                    type: string
+                    nullable: true
+                    description: null si no hay más páginas
+
+  # ─────────────────────────────────────────────────────────────
+  # INTERACTIONS
+  # ─────────────────────────────────────────────────────────────
+  /posts/{post_id}/like:
+    post:
+      tags: [Interactions]
+      summary: Dar o quitar like
+      operationId: toggleLike
+      parameters:
+        - name: post_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Estado actualizado
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  liked: { type: boolean }
+                  count: { type: integer }
+        '404': { $ref: '#/components/responses/NotFoundError' }
+
+  /posts/{post_id}/comments:
+    post:
+      tags: [Interactions]
+      summary: Comentar publicación
+      operationId: addComment
+      parameters:
+        - name: post_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [text]
+              properties:
+                text: { type: string, maxLength: 1000 }
+                parent_id: { type: string, format: uuid, nullable: true }
+      responses:
+        '201':
+          description: Comentario creado
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  comment_id: { type: string, format: uuid }
+                  created_at: { type: string, format: date-time }
+        '400': { $ref: '#/components/responses/ValidationError' }
+
+  # ─────────────────────────────────────────────────────────────
+  # NOTIFICATIONS
+  # ─────────────────────────────────────────────────────────────
+  /notifications:
+    get:
+      tags: [Notifications]
+      summary: Listar notificaciones
+      operationId: getNotifications
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+        - name: unread_only
+          in: query
+          schema: { type: boolean, default: false }
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Lista paginada
+          headers:
+            X-Next-Cursor:
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  notifications:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Notification'
+                  next_cursor:
+                    type: string
+                    nullable: true
+                  unread_count:
+                    type: integer
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Token JWT corto (15m) obtenido via /auth/login
+
+  parameters:
+    Cursor:
+      name: cursor
+      in: query
+      schema: { type: string, format: base64 }
+      description: Cursor opaco retornado en X-Next-Cursor
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 50, default: 20 }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      schema: { type: string, minLength: 10, maxLength: 128, pattern: '^[a-zA-Z0-9_\-]+$' }
+      required: false
+      description: Clave única para garantizar procesamiento exactly-once en POST
+
+  schemas:
+    RegisterRequest:
+      type: object
+      required: [username, email, password]
+      properties:
+        username: { type: string, minLength: 3, maxLength: 30, pattern: '^[a-zA-Z0-9_\.]+$' }
+        email: { type: string, format: email }
+        password: { type: string, minLength: 8, format: password }
+
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email: { type: string, format: email }
+        password: { type: string, format: password }
+
+    AuthResponse:
+      type: object
+      required: [user_id, access_token, expires_in]
+      properties:
+        user_id: { type: string, format: uuid }
+        access_token: { type: string }
+        refresh_token: { type: string }
+        expires_in: { type: integer, format: int64, description: "Segundos hasta expiración" }
+
+    UserProfile:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        username: { type: string }
+        full_name: { type: string, nullable: true }
+        bio: { type: string, nullable: true }
+        avatar_url: { type: string, format: uri, nullable: true }
+        followers_count: { type: integer }
+        following_count: { type: integer }
+        posts_count: { type: integer }
+        is_verified: { type: boolean }
+        is_private: { type: boolean }
+        is_following: { type: boolean, description: "Solo visible si autenticado" }
+        created_at: { type: string, format: date-time }
+
+    CreatePostRequest:
+      type: object
+      properties:
+        caption: { type: string, maxLength: 2200 }
+        media_urls:
+          type: array
+          items: { type: string, format: uri }
+          maxItems: 10
+        visibility:
+          type: string
+          enum: [public, followers_only, private]
+          default: public
+
+    PostDetail:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        author: { $ref: '#/components/schemas/UserProfile' }
+        caption: { type: string, nullable: true }
+        media_urls: { type: array, items: { type: string } }
+        visibility: { type: string }
+        metrics:
+          type: object
+          properties:
+            likes: { type: integer }
+            comments: { type: integer }
+            shares: { type: integer }
+        liked_by_viewer: { type: boolean }
+        created_at: { type: string, format: date-time }
+
+    FeedEntry:
+      type: object
+      properties:
+        post_id: { type: string, format: uuid }
+        author: { type: object, properties: { id: { type: string }, username: { type: string } } }
+        preview: { type: object, properties: { caption: { type: string, nullable: true }, media_count: { type: integer } } }
+        metrics: { type: object, properties: { likes: { type: integer }, comments: { type: integer } } }
+        created_at: { type: string, format: date-time }
+        cursor: { type: string, description: "Cursor estable para este item" }
+
+    Notification:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        type: { type: string, enum: [follow, like, comment, mention, system] }
+        source_user:
+          type: object
+          properties: { id: { type: string, format: uuid }, username: { type: string }, avatar_url: { type: string, nullable: true } }
+        post_id: { type: string, format: uuid, nullable: true }
+        title: { type: string }
+        body: { type: string }
+        is_read: { type: boolean }
+        created_at: { type: string, format: date-time }
+
+    Error:
+      type: object
+      properties:
+        type: { type: string, format: uri, example: "https://api.feed.local/errors/validation" }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        instance: { type: string, format: uri-path }
+        request_id: { type: string }
+        errors:
+          type: array
+          items:
+            type: object
+            properties:
+              field: { type: string }
+              message: { type: string }
+
+  responses:
+    ValidationError:
+      description: Error de validación de payload
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    UnauthorizedError:
+      description: Token inválido, expirado o ausente
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    NotFoundError:
+      description: Recurso no existe o no es visible
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    ConflictError:
+      description: Conflicto de unicidad o estado
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    IdempotentConflict:
+      description: Request ya en procesamiento (reintentar con Retry-After)
+      headers:
+        Retry-After: { schema: { type: integer }, example: 5 }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+
+security:
+  - BearerAuth: []
