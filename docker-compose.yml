@@ -1,0 +1,84 @@
+version: "3.8"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: feed_dev
+      POSTGRES_PASSWORD: dev_password
+      POSTGRES_DB: feed_db
+    ports: ["5432:5432"]
+    volumes: ["pg_data:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U feed_dev -d feed_db"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "allkeys-lru"]
+    ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  nats:
+    image: nats:2.10-alpine
+    command: ["-js", "-m", "8222", "-c", "/etc/nats/nats.conf"]
+    ports: ["4222:4222", "8222:8222"]
+    volumes: ["./infra/nats.conf:/etc/nats/nats.conf"]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8222/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ───────── SERVICIOS DE LA APLICACIÓN ─────────
+  auth:
+    build:
+      context: .
+      dockerfile: cmd/auth/Dockerfile
+      args:
+        SERVICE_NAME: auth
+    ports: ["8081:8080"]
+    environment:
+      - DB_HOST=postgres
+      - REDIS_URL=redis://redis:6379
+      - NATS_URL=nats://nats:4222
+    depends_on: [postgres, redis, nats]
+    restart: unless-stopped
+
+  feed:
+    build:
+      context: .
+      dockerfile: cmd/feed/Dockerfile
+      args:
+        SERVICE_NAME: feed
+    ports: ["8082:8080"]
+    environment:
+      - DB_HOST=postgres
+      - REDIS_URL=redis://redis:6379
+      - NATS_URL=nats://nats:4222
+    depends_on: [postgres, redis, nats]
+    restart: unless-stopped
+
+  gateway:
+    build:
+      context: .
+      dockerfile: cmd/gateway/Dockerfile
+      args:
+        SERVICE_NAME: gateway
+    ports: ["8080:8080"]
+    environment:
+      - AUTH_SERVICE_URL=http://auth:8080
+      - FEED_SERVICE_URL=http://feed:8080
+      - REDIS_URL=redis://redis:6379
+    depends_on: [auth, feed]
+    restart: unless-stopped
+
+volumes:
+  pg_data:
+  
