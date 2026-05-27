@@ -1,86 +1,91 @@
-version: "3.8"
-
 services:
+
+  # ── PostgreSQL ─────────────────────────────────────────────────────────────
   postgres:
     image: postgres:16-alpine
+    container_name: my-ig-postgres
+    restart: unless-stopped
     environment:
-      POSTGRES_USER: feed_dev
-      POSTGRES_PASSWORD: dev_password
-      POSTGRES_DB: feed_db
-    ports: ["5432:5432"]
+      POSTGRES_USER: ${POSTGRES_USER:-ig_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ig_pass}
+      POSTGRES_DB: ${POSTGRES_DB:-ig_auth}
+    ports:
+      - "5432:5432"
     volumes:
-      - pg_data:/var/lib/postgresql/data
-      - ./infra/docker/postgres-init:/docker-entrypoint-initdb.d:ro
+      - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U feed_dev -d feed_db"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ig_user} -d ${POSTGRES_DB:-ig_auth}"]
       interval: 5s
-      timeout: 3s
-      retries: 5
+      timeout: 5s
+      retries: 10
 
-  redis:
-    image: redis:7-alpine
-    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "allkeys-lru"]
-    ports: ["6379:6379"]
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 5
-
+  # ── NATS JetStream ─────────────────────────────────────────────────────────
   nats:
     image: nats:2.10-alpine
-    command: ["-js", "-m", "8222", "-c", "/etc/nats/nats.conf"]
-    ports: ["4222:4222", "8222:8222"]
-    volumes: ["./infra/nats.conf:/etc/nats/nats.conf"]
+    container_name: my-ig-nats
+    restart: unless-stopped
+    command: ["-js", "-m", "8222"]   # -js enables JetStream; -m exposes monitoring
+    ports:
+      - "4222:4222"   # client connections
+      - "8222:8222"   # HTTP monitoring
+    volumes:
+      - nats_data:/data
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8222/healthz"]
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8222/healthz"]
       interval: 5s
-      timeout: 3s
+      timeout: 5s
+      retries: 10
+
+  # ── Migrate (runs once, then exits) ───────────────────────────────────────
+  migrate-auth:
+    image: migrate/migrate:v4.18.1
+    container_name: my-ig-migrate-auth
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./auth-service/migrations:/migrations
+    command:
+      - "-path=/migrations"
+      - "-database=postgres://${POSTGRES_USER:-ig_user}:${POSTGRES_PASSWORD:-ig_pass}@postgres:5432/${POSTGRES_DB:-ig_auth}?sslmode=disable"
+      - "up"
+    restart: on-failure
+
+  # ── Auth Service ──────────────────────────────────────────────────────────
+  auth-service:
+    build:
+      context: ./auth-service
+      dockerfile: Dockerfile
+    container_name: my-ig-auth
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      migrate-auth:
+        condition: service_completed_successfully
+    environment:
+      PORT: "8080"
+      DB_DSN: "postgres://${POSTGRES_USER:-ig_user}:${POSTGRES_PASSWORD:-ig_pass}@postgres:5432/${POSTGRES_DB:-ig_auth}?sslmode=disable"
+      NATS_URL: "nats://nats:4222"
+      JWT_SECRET: ${JWT_SECRET:-changeme_in_production}
+      JWT_ACCESS_TTL: "15m"
+      JWT_REFRESH_TTL: "168h"   # 7 days
+      LOG_LEVEL: "info"
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
       retries: 5
 
-  # ───────── SERVICIOS DE LA APLICACIÓN ─────────
-  auth:
-    build:
-      context: .
-      dockerfile: cmd/auth/Dockerfile
-      args:
-        SERVICE_NAME: auth
-    ports: ["8081:8080"]
-    environment:
-      - DB_HOST=postgres
-      - REDIS_URL=redis://redis:6379
-      - NATS_URL=nats://nats:4222
-    depends_on: [postgres, redis, nats]
-    restart: unless-stopped
-
-  feed:
-    build:
-      context: .
-      dockerfile: cmd/feed/Dockerfile
-      args:
-        SERVICE_NAME: feed
-    ports: ["8082:8080"]
-    environment:
-      - DB_HOST=postgres
-      - REDIS_URL=redis://redis:6379
-      - NATS_URL=nats://nats:4222
-    depends_on: [postgres, redis, nats]
-    restart: unless-stopped
-
-  gateway:
-    build:
-      context: .
-      dockerfile: cmd/gateway/Dockerfile
-      args:
-        SERVICE_NAME: gateway
-    ports: ["8080:8080"]
-    environment:
-      - AUTH_SERVICE_URL=http://auth:8080
-      - FEED_SERVICE_URL=http://feed:8080
-      - REDIS_URL=redis://redis:6379
-    depends_on: [auth, feed]
-    restart: unless-stopped
-
 volumes:
-  pg_data:
-  
+  postgres_data:
+  nats_data:
+
+networks:
+  default:
+    name: my-ig-network
+    

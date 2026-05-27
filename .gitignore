@@ -1,1 +1,7 @@
-generated/
+.env
+*.local
+vendor/
+bin/
+dist/
+*.test
+coverage.out
