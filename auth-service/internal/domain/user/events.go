@@ -6,12 +6,13 @@ import (
 	"github.com/google/uuid"
 )
 
-// Topic es el nombre del tópico NATS para este evento.
-// Sigue la convención: domain.entity.action.version
-const TopicRegistered = "auth.user.registered.v1"
+// Tópicos NATS — convención: domain.entity.action.version
+const (
+	TopicRegistered = "auth.user.registered.v1"
+	TopicLoggedIn   = "auth.user.logged_in.v1"
+)
 
-// RegisteredEvent es el payload publicado al bus cuando un usuario se registra.
-// Nunca contiene datos sensibles (sin password hash, sin tokens).
+// RegisteredEvent se publica cuando un usuario se registra exitosamente.
 type RegisteredEvent struct {
 	EventID   uuid.UUID `json:"event_id"`
 	UserID    uuid.UUID `json:"user_id"`
@@ -21,7 +22,6 @@ type RegisteredEvent struct {
 	OccuredAt time.Time `json:"occured_at"`
 }
 
-// NewRegisteredEvent construye el evento a partir del agregado.
 func NewRegisteredEvent(u *User) RegisteredEvent {
 	return RegisteredEvent{
 		EventID:   uuid.New(),
@@ -30,5 +30,21 @@ func NewRegisteredEvent(u *User) RegisteredEvent {
 		Email:     u.Email,
 		Role:      string(u.Role),
 		OccuredAt: u.CreatedAt,
+	}
+}
+
+// LoggedInEvent se publica cuando un usuario hace login exitosamente.
+// No contiene tokens ni credenciales — solo metadata de la sesión.
+type LoggedInEvent struct {
+	EventID   uuid.UUID `json:"event_id"`
+	UserID    uuid.UUID `json:"user_id"`
+	OccuredAt time.Time `json:"occured_at"`
+}
+
+func NewLoggedInEvent(u *User) LoggedInEvent {
+	return LoggedInEvent{
+		EventID:   uuid.New(),
+		UserID:    u.ID,
+		OccuredAt: time.Now().UTC(),
 	}
 }

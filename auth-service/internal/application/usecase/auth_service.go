@@ -13,36 +13,26 @@ import (
 	"github.com/juantevez/my-ig/auth-service/internal/domain/user"
 )
 
-const bcryptCost = 12 // argon2 sería ideal en producción; bcrypt es suficiente para v1
+const bcryptCost = 12
 
 // AuthService implements input.AuthUseCase.
-// It orchestrates domain logic without depending on any infrastructure detail.
 type AuthService struct {
 	users     user.Repository
 	tokens    token.Service
 	publisher output.EventPublisher
 }
 
-// NewAuthService wires all driven ports into the service.
 func NewAuthService(
 	users user.Repository,
 	tokens token.Service,
 	publisher output.EventPublisher,
 ) *AuthService {
-	return &AuthService{
-		users:     users,
-		tokens:    tokens,
-		publisher: publisher,
-	}
+	return &AuthService{users: users, tokens: tokens, publisher: publisher}
 }
 
-// Register creates a new user account:
-//  1. Valida que el email no esté tomado (fail-fast antes de hashear)
-//  2. Hashea el password con bcrypt
-//  3. Construye y persiste el agregado User
-//  4. Publica auth.user.registered.v1 (fire-and-forget: no bloquea la respuesta)
+// Register creates a new user account, hashes the password and publishes
+// the auth.user.registered.v1 event (fire-and-forget).
 func (s *AuthService) Register(ctx context.Context, cmd input.RegisterCommand) (*input.RegisterResult, error) {
-	// 1. Fail-fast: evitamos el costo de bcrypt si el email ya existe.
 	taken, err := s.users.ExistsByEmail(ctx, cmd.Email)
 	if err != nil {
 		return nil, fmt.Errorf("register: check email: %w", err)
@@ -51,54 +41,83 @@ func (s *AuthService) Register(ctx context.Context, cmd input.RegisterCommand) (
 		return nil, user.ErrEmailAlreadyTaken
 	}
 
-	// 2. Hash del password — nunca sale del use case en texto plano.
 	hash, err := bcrypt.GenerateFromPassword([]byte(cmd.Password), bcryptCost)
 	if err != nil {
 		return nil, fmt.Errorf("register: hash password: %w", err)
 	}
 
-	// 3. Construir el agregado (valida username, email, etc. internamente).
 	u, err := user.New(cmd.Username, cmd.Email, string(hash))
 	if err != nil {
 		return nil, fmt.Errorf("register: build user: %w", err)
 	}
 
-	// 4. Persistir.
 	if err := s.users.Save(ctx, u); err != nil {
-		return nil, fmt.Errorf("register: save user: %w", err)
+		return nil, fmt.Errorf("register: save: %w", err)
 	}
 
-	// 5. Publicar evento de dominio — fire-and-forget con goroutine acotada.
-	// Un fallo aquí NO revierte el registro: el consumer puede reconciliar
-	// consultando la DB si necesita los datos del usuario.
-	event := user.NewRegisteredEvent(u)
-	go func() {
-		if err := s.publisher.Publish(context.Background(), user.TopicRegistered, event); err != nil {
-			slog.Error("register: publish event failed",
-				"topic", user.TopicRegistered,
-				"user_id", u.ID,
-				"err", err,
-			)
-		}
-	}()
+	s.publishAsync(user.TopicRegistered, user.NewRegisteredEvent(u), u.ID.String())
 
 	return &input.RegisterResult{UserID: u.ID}, nil
 }
 
-// Login authenticates a user and returns a JWT pair.
-// TODO: verify credentials, generate token pair, publish auth.user.logged_in.v1
+// Login verifies credentials and returns a fresh JWT pair.
+// Publishes auth.user.logged_in.v1 on success.
 func (s *AuthService) Login(ctx context.Context, cmd input.LoginCommand) (*input.LoginResult, error) {
-	panic("not implemented")
+	u, err := s.users.FindByEmail(ctx, cmd.Email)
+	if err != nil {
+		// Don't leak whether the email exists — always return same error.
+		return nil, user.ErrInvalidCredentials
+	}
+
+	if err := bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(cmd.Password)); err != nil {
+		return nil, user.ErrInvalidCredentials
+	}
+
+	pair, err := s.tokens.GeneratePair(ctx, u.ID, string(u.Role))
+	if err != nil {
+		return nil, fmt.Errorf("login: generate tokens: %w", err)
+	}
+
+	s.publishAsync(user.TopicLoggedIn, user.NewLoggedInEvent(u), u.ID.String())
+
+	return &input.LoginResult{
+		AccessToken:  pair.AccessToken,
+		RefreshToken: pair.RefreshToken,
+	}, nil
 }
 
-// Refresh rotates the token pair given a valid refresh token.
-// TODO: delegate to token.Service.Refresh, publish auth.token.refreshed.v1
+// Refresh validates the refresh token and rotates the pair.
 func (s *AuthService) Refresh(ctx context.Context, cmd input.RefreshCommand) (*input.RefreshResult, error) {
-	panic("not implemented")
+	pair, err := s.tokens.Refresh(ctx, cmd.RefreshToken)
+	if err != nil {
+		return nil, fmt.Errorf("refresh: %w", err)
+	}
+	return &input.RefreshResult{
+		AccessToken:  pair.AccessToken,
+		RefreshToken: pair.RefreshToken,
+	}, nil
 }
 
-// Logout revokes the active token.
-// TODO: delegate to token.Service.Revoke
+// Logout revokes the access token identified by its JTI.
 func (s *AuthService) Logout(ctx context.Context, cmd input.LogoutCommand) error {
-	panic("not implemented")
+	if err := s.tokens.Revoke(ctx, cmd.JTI); err != nil {
+		return fmt.Errorf("logout: revoke token: %w", err)
+	}
+	return nil
+}
+
+// ── internal ─────────────────────────────────────────────────────────────────
+
+// publishAsync emits a domain event in a background goroutine.
+// A failure here never rolls back the operation — consumers reconcile from DB.
+func (s *AuthService) publishAsync(topic string, event any, userID string) {
+	go func() {
+		if err := s.publisher.Publish(context.Background(), topic, event); err != nil {
+			slog.Error("event publish failed",
+				"topic", topic,
+				"user_id", userID,
+				"err", err,
+			)
+		}
+	}()
 }
