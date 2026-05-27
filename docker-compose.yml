@@ -1,33 +1,52 @@
 services:
 
-  # ── PostgreSQL ─────────────────────────────────────────────────────────────
-  postgres:
+  # ── PostgreSQL auth ───────────────────────────────────────────────────────────
+  postgres-auth:
     image: postgres:16-alpine
-    container_name: my-ig-postgres
+    container_name: my-ig-postgres-auth
     restart: unless-stopped
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-ig_user}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ig_pass}
-      POSTGRES_DB: ${POSTGRES_DB:-ig_auth}
+      POSTGRES_USER: ${AUTH_DB_USER:-ig_user}
+      POSTGRES_PASSWORD: ${AUTH_DB_PASS:-ig_pass}
+      POSTGRES_DB: ${AUTH_DB_NAME:-ig_auth}
     ports:
       - "5432:5432"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - postgres_auth_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ig_user} -d ${POSTGRES_DB:-ig_auth}"]
+      test: ["CMD-SHELL", "pg_isready -U ${AUTH_DB_USER:-ig_user} -d ${AUTH_DB_NAME:-ig_auth}"]
       interval: 5s
       timeout: 5s
       retries: 10
 
-  # ── NATS JetStream ─────────────────────────────────────────────────────────
+  # ── PostgreSQL feed ───────────────────────────────────────────────────────────
+  postgres-feed:
+    image: postgres:16-alpine
+    container_name: my-ig-postgres-feed
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${FEED_DB_USER:-ig_user}
+      POSTGRES_PASSWORD: ${FEED_DB_PASS:-ig_pass}
+      POSTGRES_DB: ${FEED_DB_NAME:-ig_feed}
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_feed_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${FEED_DB_USER:-ig_user} -d ${FEED_DB_NAME:-ig_feed}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── NATS JetStream ────────────────────────────────────────────────────────────
   nats:
     image: nats:2.10-alpine
     container_name: my-ig-nats
     restart: unless-stopped
-    command: ["-js", "-m", "8222"]   # -js enables JetStream; -m exposes monitoring
+    command: ["-js", "-m", "8222"]
     ports:
-      - "4222:4222"   # client connections
-      - "8222:8222"   # HTTP monitoring
+      - "4222:4222"
+      - "8222:8222"
     volumes:
       - nats_data:/data
     healthcheck:
@@ -36,30 +55,45 @@ services:
       timeout: 5s
       retries: 10
 
-  # ── Migrate (runs once, then exits) ───────────────────────────────────────
+  # ── Migrate auth ──────────────────────────────────────────────────────────────
   migrate-auth:
     image: migrate/migrate:v4.18.1
     container_name: my-ig-migrate-auth
     depends_on:
-      postgres:
+      postgres-auth:
         condition: service_healthy
     volumes:
       - ./auth-service/migrations:/migrations
     command:
       - "-path=/migrations"
-      - "-database=postgres://${POSTGRES_USER:-ig_user}:${POSTGRES_PASSWORD:-ig_pass}@postgres:5432/${POSTGRES_DB:-ig_auth}?sslmode=disable"
+      - "-database=postgres://${AUTH_DB_USER:-ig_user}:${AUTH_DB_PASS:-ig_pass}@postgres-auth:5432/${AUTH_DB_NAME:-ig_auth}?sslmode=disable"
       - "up"
     restart: on-failure
 
-  # ── Auth Service ──────────────────────────────────────────────────────────
+  # ── Migrate feed ──────────────────────────────────────────────────────────────
+  migrate-feed:
+    image: migrate/migrate:v4.18.1
+    container_name: my-ig-migrate-feed
+    depends_on:
+      postgres-feed:
+        condition: service_healthy
+    volumes:
+      - ./feed-service/migrations:/migrations
+    command:
+      - "-path=/migrations"
+      - "-database=postgres://${FEED_DB_USER:-ig_user}:${FEED_DB_PASS:-ig_pass}@postgres-feed:5432/${FEED_DB_NAME:-ig_feed}?sslmode=disable"
+      - "up"
+    restart: on-failure
+
+  # ── Auth Service ──────────────────────────────────────────────────────────────
   auth-service:
     build:
-      context: ./auth-service
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: auth-service/Dockerfile
     container_name: my-ig-auth
     restart: unless-stopped
     depends_on:
-      postgres:
+      postgres-auth:
         condition: service_healthy
       nats:
         condition: service_healthy
@@ -67,11 +101,11 @@ services:
         condition: service_completed_successfully
     environment:
       PORT: "8080"
-      DB_DSN: "postgres://${POSTGRES_USER:-ig_user}:${POSTGRES_PASSWORD:-ig_pass}@postgres:5432/${POSTGRES_DB:-ig_auth}?sslmode=disable"
+      DB_DSN: "postgres://${AUTH_DB_USER:-ig_user}:${AUTH_DB_PASS:-ig_pass}@postgres-auth:5432/${AUTH_DB_NAME:-ig_auth}?sslmode=disable"
       NATS_URL: "nats://nats:4222"
       JWT_SECRET: ${JWT_SECRET:-changeme_in_production}
       JWT_ACCESS_TTL: "15m"
-      JWT_REFRESH_TTL: "168h"   # 7 days
+      JWT_REFRESH_TTL: "168h"
       LOG_LEVEL: "info"
     ports:
       - "8080:8080"
@@ -81,8 +115,36 @@ services:
       timeout: 5s
       retries: 5
 
+  # ── Feed Service ──────────────────────────────────────────────────────────────
+  feed-service:
+    build:
+      context: .
+      dockerfile: feed-service/Dockerfile
+    container_name: my-ig-feed
+    restart: unless-stopped
+    depends_on:
+      postgres-feed:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      migrate-feed:
+        condition: service_completed_successfully
+    environment:
+      PORT: "8081"
+      DB_DSN: "postgres://${FEED_DB_USER:-ig_user}:${FEED_DB_PASS:-ig_pass}@postgres-feed:5432/${FEED_DB_NAME:-ig_feed}?sslmode=disable"
+      NATS_URL: "nats://nats:4222"
+      LOG_LEVEL: "info"
+    ports:
+      - "8081:8081"
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8081/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
 volumes:
-  postgres_data:
+  postgres_auth_data:
+  postgres_feed_data:
   nats_data:
 
 networks:

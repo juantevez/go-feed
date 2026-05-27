@@ -1,6 +1,6 @@
-.PHONY: up down logs migrate build lint test
+.PHONY: up down logs build test migrate-auth migrate-feed
 
-# ── Docker ──────────────────────────────────────────────────────────────────
+# ── Docker ────────────────────────────────────────────────────────────────────
 up:
 	@cp -n .env.example .env 2>/dev/null || true
 	docker compose up --build -d
@@ -8,33 +8,40 @@ up:
 down:
 	docker compose down -v
 
-logs:
+logs-auth:
 	docker compose logs -f auth-service
 
-restart-auth:
-	docker compose restart auth-service
-
-# ── Migrations (local, requires migrate CLI) ─────────────────────────────────
-migrate-up:
-	migrate -path auth-service/migrations \
-	        -database "postgres://ig_user:ig_pass@localhost:5432/ig_auth?sslmode=disable" up
-
-migrate-down:
-	migrate -path auth-service/migrations \
-	        -database "postgres://ig_user:ig_pass@localhost:5432/ig_auth?sslmode=disable" down 1
+logs-feed:
+	docker compose logs -f feed-service
 
 # ── Build ─────────────────────────────────────────────────────────────────────
 build:
+	cd shared       && go build ./...
 	cd auth-service && go build ./...
+	cd feed-service && go build ./...
 
-# ── Code quality ──────────────────────────────────────────────────────────────
-lint:
-	cd auth-service && golangci-lint run ./...
-
+# ── Test ──────────────────────────────────────────────────────────────────────
 test:
+	cd shared       && go test ./... -race -count=1
 	cd auth-service && go test ./... -race -count=1
+	cd feed-service && go test ./... -race -count=1
 
-# ── NATS monitoring (requires curl) ──────────────────────────────────────────
+# ── Tidy (correr después de agregar dependencias) ─────────────────────────────
+tidy:
+	cd shared       && go mod tidy
+	cd auth-service && go mod tidy
+	cd feed-service && go mod tidy
+
+# ── Migrations locales ────────────────────────────────────────────────────────
+migrate-auth:
+	migrate -path auth-service/migrations \
+	        -database "postgres://ig_user:ig_pass@localhost:5432/ig_auth?sslmode=disable" up
+
+migrate-feed:
+	migrate -path feed-service/migrations \
+	        -database "postgres://ig_user:ig_pass@localhost:5433/ig_feed?sslmode=disable" up
+
+# ── NATS monitoring ───────────────────────────────────────────────────────────
 nats-info:
 	curl -s http://localhost:8222/varz | jq .
 	
