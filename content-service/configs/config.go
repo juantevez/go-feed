@@ -35,14 +35,16 @@ type NATSConfig struct {
 }
 
 type S3Config struct {
-	Bucket   string
-	Region   string
-	Endpoint string // para MinIO local; vacío en AWS real
-	BaseURL  string // URL pública del bucket
+	Bucket    string
+	Region    string
+	Endpoint  string // para MinIO local; vacío en AWS real
+	BaseURL   string // URL pública del bucket
+	AccessKey string // minioadmin en local; AWS key en producción
+	SecretKey string
 }
 
 type JWTConfig struct {
-	Secret string // debe ser el mismo que usa auth-service
+	Secret string
 }
 
 func Load() (*Config, error) {
@@ -53,6 +55,8 @@ func Load() (*Config, error) {
 	bucket := requireEnv("S3_BUCKET", &errs)
 	region := requireEnv("S3_REGION", &errs)
 	baseURL := requireEnv("S3_BASE_URL", &errs)
+	accessKey := requireEnv("S3_ACCESS_KEY", &errs)
+	secretKey := requireEnv("S3_SECRET_KEY", &errs)
 	jwtSecret := requireEnv("JWT_SECRET", &errs)
 
 	if len(errs) > 0 {
@@ -62,7 +66,7 @@ func Load() (*Config, error) {
 	return &Config{
 		HTTP: HTTPConfig{
 			Port:         envOr("PORT", "8082"),
-			ReadTimeout:  parseDuration("HTTP_READ_TIMEOUT", 30*time.Second), // más largo por uploads
+			ReadTimeout:  parseDuration("HTTP_READ_TIMEOUT", 30*time.Second),
 			WriteTimeout: parseDuration("HTTP_WRITE_TIMEOUT", 30*time.Second),
 			IdleTimeout:  parseDuration("HTTP_IDLE_TIMEOUT", 60*time.Second),
 		},
@@ -77,10 +81,12 @@ func Load() (*Config, error) {
 			ConnectTimeout: parseDuration("NATS_CONNECT_TIMEOUT", 5*time.Second),
 		},
 		S3: S3Config{
-			Bucket:   bucket,
-			Region:   region,
-			Endpoint: os.Getenv("S3_ENDPOINT"), // vacío en AWS, seteado en local con MinIO
-			BaseURL:  baseURL,
+			Bucket:    bucket,
+			Region:    region,
+			Endpoint:  os.Getenv("S3_ENDPOINT"),
+			BaseURL:   baseURL,
+			AccessKey: accessKey,
+			SecretKey: secretKey,
 		},
 		JWT: JWTConfig{Secret: jwtSecret},
 	}, nil

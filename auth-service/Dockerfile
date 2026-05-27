@@ -3,12 +3,13 @@ FROM golang:1.25-alpine AS builder
 
 WORKDIR /app
 
-# Download dependencies first (layer cache)
-COPY go.mod go.sum ./
-RUN go mod download
+# shared debe estar disponible para el replace directive
+COPY shared/ ./shared/
+COPY auth-service/ ./auth-service/
 
-# Copy source and build a statically linked binary
-COPY . .
+WORKDIR /app/auth-service
+
+RUN go mod download
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
     go build -ldflags="-s -w" -o /auth-service ./cmd/server
 
@@ -16,7 +17,6 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
 FROM gcr.io/distroless/static-debian12 AS runtime
 
 WORKDIR /app
-
 COPY --from=builder /auth-service /app/auth-service
 
 EXPOSE 8080

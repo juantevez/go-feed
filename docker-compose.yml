@@ -38,6 +38,44 @@ services:
       timeout: 5s
       retries: 10
 
+  # ── PostgreSQL content ────────────────────────────────────────────────────────
+  postgres-content:
+    image: postgres:16-alpine
+    container_name: my-ig-postgres-content
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${CONTENT_DB_USER:-ig_user}
+      POSTGRES_PASSWORD: ${CONTENT_DB_PASS:-ig_pass}
+      POSTGRES_DB: ${CONTENT_DB_NAME:-ig_content}
+    ports:
+      - "5434:5432"
+    volumes:
+      - postgres_content_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${CONTENT_DB_USER:-ig_user} -d ${CONTENT_DB_NAME:-ig_content}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── PostgreSQL social ─────────────────────────────────────────────────────────
+  postgres-social:
+    image: postgres:16-alpine
+    container_name: my-ig-postgres-social
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${SOCIAL_DB_USER:-ig_user}
+      POSTGRES_PASSWORD: ${SOCIAL_DB_PASS:-ig_pass}
+      POSTGRES_DB: ${SOCIAL_DB_NAME:-ig_social}
+    ports:
+      - "5435:5432"
+    volumes:
+      - postgres_social_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${SOCIAL_DB_USER:-ig_user} -d ${SOCIAL_DB_NAME:-ig_social}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   # ── NATS JetStream ────────────────────────────────────────────────────────────
   nats:
     image: nats:2.10-alpine
@@ -54,6 +92,26 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+
+  # ── MinIO (S3 local) ──────────────────────────────────────────────────────────
+  minio:
+    image: minio/minio:latest
+    container_name: my-ig-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   # ── Migrate auth ──────────────────────────────────────────────────────────────
   migrate-auth:
@@ -82,6 +140,36 @@ services:
     command:
       - "-path=/migrations"
       - "-database=postgres://${FEED_DB_USER:-ig_user}:${FEED_DB_PASS:-ig_pass}@postgres-feed:5432/${FEED_DB_NAME:-ig_feed}?sslmode=disable"
+      - "up"
+    restart: on-failure
+
+  # ── Migrate content ───────────────────────────────────────────────────────────
+  migrate-content:
+    image: migrate/migrate:v4.18.1
+    container_name: my-ig-migrate-content
+    depends_on:
+      postgres-content:
+        condition: service_healthy
+    volumes:
+      - ./content-service/migrations:/migrations
+    command:
+      - "-path=/migrations"
+      - "-database=postgres://${CONTENT_DB_USER:-ig_user}:${CONTENT_DB_PASS:-ig_pass}@postgres-content:5432/${CONTENT_DB_NAME:-ig_content}?sslmode=disable"
+      - "up"
+    restart: on-failure
+
+  # ── Migrate social ────────────────────────────────────────────────────────────
+  migrate-social:
+    image: migrate/migrate:v4.18.1
+    container_name: my-ig-migrate-social
+    depends_on:
+      postgres-social:
+        condition: service_healthy
+    volumes:
+      - ./social-service/migrations:/migrations
+    command:
+      - "-path=/migrations"
+      - "-database=postgres://${SOCIAL_DB_USER:-ig_user}:${SOCIAL_DB_PASS:-ig_pass}@postgres-social:5432/${SOCIAL_DB_NAME:-ig_social}?sslmode=disable"
       - "up"
     restart: on-failure
 
@@ -142,10 +230,77 @@ services:
       timeout: 5s
       retries: 5
 
+  # ── Content Service ───────────────────────────────────────────────────────────
+  content-service:
+    build:
+      context: .
+      dockerfile: content-service/Dockerfile
+    container_name: my-ig-content
+    restart: unless-stopped
+    depends_on:
+      postgres-content:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      migrate-content:
+        condition: service_completed_successfully
+    environment:
+      PORT: "8082"
+      DB_DSN: "postgres://${CONTENT_DB_USER:-ig_user}:${CONTENT_DB_PASS:-ig_pass}@postgres-content:5432/${CONTENT_DB_NAME:-ig_content}?sslmode=disable"
+      NATS_URL: "nats://nats:4222"
+      S3_BUCKET: "my-ig-media"
+      S3_REGION: "us-east-1"
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-minioadmin}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-minioadmin}
+      S3_ENDPOINT: "http://minio:9000"
+      S3_BASE_URL: "http://localhost:9000/my-ig-media"
+      JWT_SECRET: ${JWT_SECRET:-changeme_in_production}
+      LOG_LEVEL: "info"
+    ports:
+      - "8082:8082"
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8082/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Social Service ────────────────────────────────────────────────────────────
+  social-service:
+    build:
+      context: .
+      dockerfile: social-service/Dockerfile
+    container_name: my-ig-social
+    restart: unless-stopped
+    depends_on:
+      postgres-social:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      migrate-social:
+        condition: service_completed_successfully
+    environment:
+      PORT: "8083"
+      DB_DSN: "postgres://${SOCIAL_DB_USER:-ig_user}:${SOCIAL_DB_PASS:-ig_pass}@postgres-social:5432/${SOCIAL_DB_NAME:-ig_social}?sslmode=disable"
+      NATS_URL: "nats://nats:4222"
+      JWT_SECRET: ${JWT_SECRET:-changeme_in_production}
+      LOG_LEVEL: "info"
+    ports:
+      - "8083:8083"
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8083/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
 volumes:
   postgres_auth_data:
   postgres_feed_data:
+  postgres_content_data:
+  postgres_social_data:
   nats_data:
+  minio_data:
 
 networks:
   default:

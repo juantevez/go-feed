@@ -50,7 +50,7 @@ func main() {
 	}
 	defer nc.Close()
 
-	// ── S3 ────────────────────────────────────────────────────────────────────
+	// ── S3 / MinIO ────────────────────────────────────────────────────────────
 	s3Client, err := connectS3(cfg.S3)
 	if err != nil {
 		slog.Error("s3 connect error", "err", err)
@@ -103,14 +103,12 @@ func main() {
 func connectDB(cfg configs.DBConfig) (*pgxpool.Pool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.ConnectTimeout)
 	defer cancel()
-
 	poolCfg, err := pgxpool.ParseConfig(cfg.DSN)
 	if err != nil {
 		return nil, fmt.Errorf("parse db dsn: %w", err)
 	}
 	poolCfg.MaxConns = cfg.MaxConns
 	poolCfg.MinConns = cfg.MinConns
-
 	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
 	if err != nil {
 		return nil, fmt.Errorf("create pool: %w", err)
@@ -141,15 +139,9 @@ func connectNATS(cfg configs.NATSConfig) (nats.JetStreamContext, *nats.Conn, err
 func connectS3(cfg configs.S3Config) (*awss3.Client, error) {
 	optFns := []func(*awsconfig.LoadOptions) error{
 		awsconfig.WithRegion(cfg.Region),
-	}
-
-	// Para desarrollo local con MinIO
-	if cfg.Endpoint != "" {
-		optFns = append(optFns,
-			awsconfig.WithCredentialsProvider(
-				credentials.NewStaticCredentialsProvider("minioadmin", "minioadmin", ""),
-			),
-		)
+		awsconfig.WithCredentialsProvider(
+			credentials.NewStaticCredentialsProvider(cfg.AccessKey, cfg.SecretKey, ""),
+		),
 	}
 
 	awsCfg, err := awsconfig.LoadDefaultConfig(context.Background(), optFns...)
@@ -159,6 +151,7 @@ func connectS3(cfg configs.S3Config) (*awss3.Client, error) {
 
 	clientOpts := []func(*awss3.Options){}
 	if cfg.Endpoint != "" {
+		// MinIO o cualquier S3-compatible local
 		clientOpts = append(clientOpts, func(o *awss3.Options) {
 			o.BaseEndpoint = &cfg.Endpoint
 			o.UsePathStyle = true // MinIO requiere path-style
