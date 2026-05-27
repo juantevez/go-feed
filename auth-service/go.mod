@@ -9,6 +9,7 @@ require (
 	github.com/jackc/pgx/v5 v5.9.2
 	github.com/nats-io/nats.go v1.52.0
 	golang.org/x/crypto v0.52.0
+	github.com/juantevez/my-ig/shared v0.0.0
 )
 
 require (
@@ -22,3 +23,5 @@ require (
 	golang.org/x/sys v0.45.0 // indirect
 	golang.org/x/text v0.37.0 // indirect
 )
+
+replace github.com/juantevez/my-ig/shared => ../shared

@@ -10,6 +10,7 @@ import (
 	"github.com/juantevez/my-ig/auth-service/internal/application/port/input"
 	"github.com/juantevez/my-ig/auth-service/internal/application/usecase"
 	"github.com/juantevez/my-ig/auth-service/internal/domain/user"
+	"github.com/juantevez/my-ig/shared/events"
 )
 
 // ── Mocks ────────────────────────────────────────────────────────────────────
@@ -106,8 +107,8 @@ func TestRegister_Success(t *testing.T) {
 	if len(pub.published) != 1 {
 		t.Fatalf("expected 1 event published, got %d", len(pub.published))
 	}
-	if pub.published[0].topic != user.TopicRegistered {
-		t.Errorf("expected topic %q, got %q", user.TopicRegistered, pub.published[0].topic)
+	if pub.published[0].topic != events.TopicAuthUserRegistered {
+		t.Errorf("expected topic %q, got %q", events.TopicAuthUserRegistered, pub.published[0].topic)
 	}
 }
 
