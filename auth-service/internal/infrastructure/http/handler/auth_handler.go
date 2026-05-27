@@ -3,7 +3,7 @@ package handler
 import (
 	"net/http"
 
-	"github.com/tuusuario/my-ig/auth-service/internal/application/port/input"
+	"github.com/juantevez/my-ig/auth-service/internal/application/port/input"
 )
 
 // AuthHandler is the HTTP adapter for the AuthUseCase driving port.

@@ -5,7 +5,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
-	"github.com/tuusuario/my-ig/auth-service/internal/infrastructure/http/handler"
+	"github.com/juantevez/my-ig/auth-service/internal/infrastructure/http/handler"
 )
 
 func New(auth *handler.AuthHandler) http.Handler {
