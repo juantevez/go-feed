@@ -4,11 +4,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
+	chimiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
 	"github.com/juantevez/my-ig/feed-service/internal/application/port/input"
 	"github.com/juantevez/my-ig/feed-service/internal/domain/feed"
@@ -45,16 +47,20 @@ type feedResponse struct {
 //
 // Header requerido: X-User-ID (inyectado por el API Gateway desde el JWT)
 func (h *FeedHandler) GetFeed(w http.ResponseWriter, r *http.Request) {
+	reqID := chimiddleware.GetReqID(r.Context())
+
 	// En producción el API Gateway valida el JWT y propaga el user_id como header.
 	// En desarrollo el middleware local puede inyectarlo.
 	userIDStr := r.Header.Get("X-User-ID")
 	if userIDStr == "" {
+		slog.Warn("get_feed: missing X-User-ID header", "request_id", reqID)
 		respondError(w, http.StatusUnauthorized, "missing X-User-ID header")
 		return
 	}
 
 	userID, err := uuid.Parse(userIDStr)
 	if err != nil {
+		slog.Warn("get_feed: invalid X-User-ID", "request_id", reqID, "raw", userIDStr)
 		respondError(w, http.StatusBadRequest, "invalid X-User-ID")
 		return
 	}
@@ -65,10 +71,13 @@ func (h *FeedHandler) GetFeed(w http.ResponseWriter, r *http.Request) {
 	if raw := r.URL.Query().Get("cursor"); raw != "" {
 		cursor, err = parseCursor(raw)
 		if err != nil {
+			slog.Warn("get_feed: invalid cursor", "request_id", reqID, "user_id", userID, "cursor", raw)
 			respondError(w, http.StatusBadRequest, "invalid cursor")
 			return
 		}
 	}
+
+	slog.Info("get_feed: request", "request_id", reqID, "user_id", userID, "limit", limit, "has_cursor", cursor != nil)
 
 	result, err := h.feed.GetFeed(r.Context(), input.GetFeedQuery{
 		UserID: userID,
@@ -77,9 +86,11 @@ func (h *FeedHandler) GetFeed(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		if errors.Is(err, feed.ErrFeedEmpty) {
+			slog.Info("get_feed: empty", "request_id", reqID, "user_id", userID)
 			respondJSON(w, http.StatusOK, feedResponse{Entries: []feedEntryResponse{}, HasMore: false})
 			return
 		}
+		slog.Error("get_feed: unexpected error", "request_id", reqID, "user_id", userID, "err", err)
 		respondError(w, http.StatusInternalServerError, "failed to get feed")
 		return
 	}
@@ -100,6 +111,7 @@ func (h *FeedHandler) GetFeed(w http.ResponseWriter, r *http.Request) {
 		resp.NextCursor = encodeCursor(result.NextCursor)
 	}
 
+	slog.Info("get_feed: ok", "request_id", reqID, "user_id", userID, "entry_count", len(resp.Entries), "has_more", resp.HasMore)
 	respondJSON(w, http.StatusOK, resp)
 }
 

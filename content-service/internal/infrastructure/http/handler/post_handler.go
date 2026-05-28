@@ -3,10 +3,12 @@ package handler
 import (
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	chimiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
 	"github.com/juantevez/my-ig/content-service/internal/application/port/input"
 	"github.com/juantevez/my-ig/content-service/internal/domain/post"
@@ -30,13 +32,17 @@ func NewPostHandler(posts input.PostUseCase) *PostHandler {
 // Fields: caption, visibility
 // Files:  media[] (imágenes o videos)
 func (h *PostHandler) CreatePost(w http.ResponseWriter, r *http.Request) {
+	reqID := chimiddleware.GetReqID(r.Context())
+
 	claims, ok := middleware.ClaimsFromContext(r.Context())
 	if !ok {
+		slog.Warn("create_post: unauthorized", "request_id", reqID)
 		respondError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
 
 	if err := r.ParseMultipartForm(maxUploadSize); err != nil {
+		slog.Warn("create_post: invalid multipart form", "request_id", reqID, "author_id", claims.Sub, "err", err)
 		respondError(w, http.StatusBadRequest, "request too large or invalid multipart form")
 		return
 	}
@@ -52,6 +58,13 @@ func (h *PostHandler) CreatePost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	slog.Info("create_post: attempt",
+		"request_id", reqID,
+		"author_id", claims.Sub,
+		"visibility", visibility,
+		"file_count", len(files),
+	)
+
 	result, err := h.posts.CreatePost(r.Context(), input.CreatePostCommand{
 		AuthorID:   claims.Sub,
 		Caption:    r.FormValue("caption"),
@@ -62,19 +75,24 @@ func (h *PostHandler) CreatePost(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		switch {
 		case errors.Is(err, post.ErrInvalidCaption):
+			slog.Warn("create_post: invalid caption", "request_id", reqID, "author_id", claims.Sub, "err", err)
 			respondError(w, http.StatusBadRequest, err.Error())
 		default:
+			slog.Error("create_post: unexpected error", "request_id", reqID, "author_id", claims.Sub, "err", err)
 			respondError(w, http.StatusInternalServerError, "failed to create post")
 		}
 		return
 	}
 
+	slog.Info("create_post: ok", "request_id", reqID, "post_id", result.Post.ID, "author_id", claims.Sub)
 	respondJSON(w, http.StatusCreated, toPostResponse(result.Post))
 }
 
 // ── GET /posts/{id} ───────────────────────────────────────────────────────────
 
 func (h *PostHandler) GetPost(w http.ResponseWriter, r *http.Request) {
+	reqID := chimiddleware.GetReqID(r.Context())
+
 	postID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
 		respondError(w, http.StatusBadRequest, "invalid post id")
@@ -93,8 +111,10 @@ func (h *PostHandler) GetPost(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		switch {
 		case errors.Is(err, post.ErrPostNotFound):
+			slog.Warn("get_post: not found", "request_id", reqID, "post_id", postID)
 			respondError(w, http.StatusNotFound, "post not found")
 		default:
+			slog.Error("get_post: unexpected error", "request_id", reqID, "post_id", postID, "err", err)
 			respondError(w, http.StatusInternalServerError, "failed to get post")
 		}
 		return
@@ -106,8 +126,11 @@ func (h *PostHandler) GetPost(w http.ResponseWriter, r *http.Request) {
 // ── DELETE /posts/{id} ────────────────────────────────────────────────────────
 
 func (h *PostHandler) DeletePost(w http.ResponseWriter, r *http.Request) {
+	reqID := chimiddleware.GetReqID(r.Context())
+
 	claims, ok := middleware.ClaimsFromContext(r.Context())
 	if !ok {
+		slog.Warn("delete_post: unauthorized", "request_id", reqID)
 		respondError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
@@ -118,6 +141,8 @@ func (h *PostHandler) DeletePost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	slog.Info("delete_post: attempt", "request_id", reqID, "post_id", postID, "author_id", claims.Sub)
+
 	err = h.posts.DeletePost(r.Context(), input.DeletePostCommand{
 		PostID:   postID,
 		AuthorID: claims.Sub,
@@ -127,17 +152,22 @@ func (h *PostHandler) DeletePost(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		switch {
 		case errors.Is(err, post.ErrPostNotFound):
+			slog.Warn("delete_post: not found", "request_id", reqID, "post_id", postID)
 			respondError(w, http.StatusNotFound, "post not found")
 		case errors.Is(err, post.ErrNotAuthor):
+			slog.Warn("delete_post: forbidden", "request_id", reqID, "post_id", postID, "author_id", claims.Sub)
 			respondError(w, http.StatusForbidden, "not authorized to delete this post")
 		case errors.Is(err, post.ErrAlreadyDeleted):
+			slog.Warn("delete_post: already deleted", "request_id", reqID, "post_id", postID)
 			respondError(w, http.StatusGone, "post already deleted")
 		default:
+			slog.Error("delete_post: unexpected error", "request_id", reqID, "post_id", postID, "err", err)
 			respondError(w, http.StatusInternalServerError, "failed to delete post")
 		}
 		return
 	}
 
+	slog.Info("delete_post: ok", "request_id", reqID, "post_id", postID, "author_id", claims.Sub)
 	w.WriteHeader(http.StatusNoContent)
 }
 
