@@ -294,15 +294,79 @@ services:
       timeout: 5s
       retries: 5
 
+
+  # ── PostgreSQL notification ───────────────────────────────────────────────────
+  postgres-notification:
+    image: postgres:16-alpine
+    container_name: my-ig-postgres-notification
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${NOTIF_DB_USER:-ig_user}
+      POSTGRES_PASSWORD: ${NOTIF_DB_PASS:-ig_pass}
+      POSTGRES_DB: ${NOTIF_DB_NAME:-ig_notification}
+    ports:
+      - "5436:5432"
+    volumes:
+      - postgres_notification_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${NOTIF_DB_USER:-ig_user} -d ${NOTIF_DB_NAME:-ig_notification}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── Migrate notification ──────────────────────────────────────────────────────
+  migrate-notification:
+    image: migrate/migrate:v4.18.1
+    container_name: my-ig-migrate-notification
+    depends_on:
+      postgres-notification:
+        condition: service_healthy
+    volumes:
+      - ./notification-service/migrations:/migrations
+    command:
+      - "-path=/migrations"
+      - "-database=postgres://${NOTIF_DB_USER:-ig_user}:${NOTIF_DB_PASS:-ig_pass}@postgres-notification:5432/${NOTIF_DB_NAME:-ig_notification}?sslmode=disable"
+      - "up"
+    restart: on-failure
+
+  # ── Notification Service ──────────────────────────────────────────────────────
+  notification-service:
+    build:
+      context: .
+      dockerfile: notification-service/Dockerfile
+    container_name: my-ig-notification
+    restart: unless-stopped
+    depends_on:
+      postgres-notification:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      migrate-notification:
+        condition: service_completed_successfully
+    environment:
+      PORT: "8084"
+      DB_DSN: "postgres://${NOTIF_DB_USER:-ig_user}:${NOTIF_DB_PASS:-ig_pass}@postgres-notification:5432/${NOTIF_DB_NAME:-ig_notification}?sslmode=disable"
+      NATS_URL: "nats://nats:4222"
+      JWT_SECRET: ${JWT_SECRET:-changeme_in_production}
+      LOG_LEVEL: "info"
+    ports:
+      - "8084:8084"
+    healthcheck:
+      test: ["CMD-SHELL", "true"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+
 volumes:
   postgres_auth_data:
   postgres_feed_data:
   postgres_content_data:
   postgres_social_data:
   nats_data:
+  postgres_notification_data:
   minio_data:
 
 networks:
   default:
     name: my-ig-network
-    

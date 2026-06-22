@@ -1,0 +1,298 @@
+{
+  "info": {
+    "name": "my-ig API",
+    "description": "Smoke test collection para el monorepo my-ig.\nFlujo: Register → Login → Follow → Create Post → Get Feed → Notifications",
+    "_postman_id": "my-ig-collection-v2",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "AUTH_URL",      "value": "http://localhost:8080" },
+    { "key": "FEED_URL",      "value": "http://localhost:8081" },
+    { "key": "CONTENT_URL",   "value": "http://localhost:8082" },
+    { "key": "SOCIAL_URL",    "value": "http://localhost:8083" },
+    { "key": "NOTIF_URL",     "value": "http://localhost:8084" },
+    { "key": "ACCESS_TOKEN",  "value": "" },
+    { "key": "REFRESH_TOKEN", "value": "" },
+    { "key": "USER_ID",       "value": "" },
+    { "key": "USER2_ID",      "value": "" },
+    { "key": "ACCESS_TOKEN2", "value": "" },
+    { "key": "POST_ID",       "value": "" },
+    { "key": "NOTIF_ID",      "value": "" }
+  ],
+  "item": [
+    {
+      "name": "1. Auth Service",
+      "item": [
+        {
+          "name": "Register User 1 (juandev)",
+          "event": [{ "listen": "test", "script": { "exec": [
+            "const res = pm.response.json();",
+            "if (res.user_id) { pm.collectionVariables.set('USER_ID', res.user_id); }",
+            "pm.test('Status 201', () => pm.response.to.have.status(201));",
+            "pm.test('Has user_id', () => pm.expect(res.user_id).to.be.a('string'));"
+          ]}}],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{AUTH_URL}}/auth/register",
+            "body": { "mode": "raw", "raw": "{\n  \"username\": \"juandev\",\n  \"email\": \"juan@example.com\",\n  \"password\": \"secret123\"\n}" }
+          }
+        },
+        {
+          "name": "Register User 2 (otrouser)",
+          "event": [{ "listen": "test", "script": { "exec": [
+            "const res = pm.response.json();",
+            "if (res.user_id) { pm.collectionVariables.set('USER2_ID', res.user_id); }",
+            "pm.test('Status 201', () => pm.response.to.have.status(201));"
+          ]}}],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{AUTH_URL}}/auth/register",
+            "body": { "mode": "raw", "raw": "{\n  \"username\": \"otrouser\",\n  \"email\": \"otro@example.com\",\n  \"password\": \"secret123\"\n}" }
+          }
+        },
+        {
+          "name": "Login User 1 (juandev)",
+          "event": [{ "listen": "test", "script": { "exec": [
+            "const res = pm.response.json();",
+            "if (res.access_token) {",
+            "  pm.collectionVariables.set('ACCESS_TOKEN', res.access_token);",
+            "  pm.collectionVariables.set('REFRESH_TOKEN', res.refresh_token);",
+            "}",
+            "pm.test('Status 200', () => pm.response.to.have.status(200));",
+            "pm.test('Has access_token', () => pm.expect(res.access_token).to.be.a('string'));"
+          ]}}],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{AUTH_URL}}/auth/login",
+            "body": { "mode": "raw", "raw": "{\n  \"email\": \"juan@example.com\",\n  \"password\": \"secret123\"\n}" }
+          }
+        },
+        {
+          "name": "Login User 2 (otrouser)",
+          "event": [{ "listen": "test", "script": { "exec": [
+            "const res = pm.response.json();",
+            "if (res.access_token) { pm.collectionVariables.set('ACCESS_TOKEN2', res.access_token); }",
+            "pm.test('Status 200', () => pm.response.to.have.status(200));"
+          ]}}],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{AUTH_URL}}/auth/login",
+            "body": { "mode": "raw", "raw": "{\n  \"email\": \"otro@example.com\",\n  \"password\": \"secret123\"\n}" }
+          }
+        },
+        {
+          "name": "Refresh Token",
+          "event": [{ "listen": "test", "script": { "exec": [
+            "const res = pm.response.json();",
+            "if (res.access_token) {",
+            "  pm.collectionVariables.set('ACCESS_TOKEN', res.access_token);",
+            "  pm.collectionVariables.set('REFRESH_TOKEN', res.refresh_token);",
+            "}",
+            "pm.test('Status 200', () => pm.response.to.have.status(200));"
+          ]}}],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{AUTH_URL}}/auth/refresh",
+            "body": { "mode": "raw", "raw": "{\n  \"refresh_token\": \"{{REFRESH_TOKEN}}\"\n}" }
+          }
+        },
+        {
+          "name": "Logout",
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('Status 204', () => pm.response.to.have.status(204));"
+          ]}}],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{ACCESS_TOKEN}}" }],
+            "url": "{{AUTH_URL}}/auth/logout"
+          }
+        }
+      ]
+    },
+    {
+      "name": "2. Social Service",
+      "item": [
+        {
+          "name": "Follow User 2 (juandev → otrouser)",
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('Status 200', () => pm.response.to.have.status(200));",
+            "pm.test('Status following', () => pm.expect(pm.response.json().status).to.eql('following'));"
+          ]}}],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{ACCESS_TOKEN}}" }],
+            "url": "{{SOCIAL_URL}}/follow/{{USER2_ID}}"
+          }
+        },
+        {
+          "name": "Get Followers of User 2",
+          "request": { "method": "GET", "url": "{{SOCIAL_URL}}/users/{{USER2_ID}}/followers" }
+        },
+        {
+          "name": "Get Following of User 1",
+          "request": { "method": "GET", "url": "{{SOCIAL_URL}}/users/{{USER_ID}}/following" }
+        },
+        {
+          "name": "Get Stats User 1",
+          "request": { "method": "GET", "url": "{{SOCIAL_URL}}/users/{{USER_ID}}/stats" }
+        },
+        {
+          "name": "Unfollow User 2",
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('Status 204', () => pm.response.to.have.status(204));"
+          ]}}],
+          "request": {
+            "method": "DELETE",
+            "header": [{ "key": "Authorization", "value": "Bearer {{ACCESS_TOKEN}}" }],
+            "url": "{{SOCIAL_URL}}/follow/{{USER2_ID}}"
+          }
+        }
+      ]
+    },
+    {
+      "name": "3. Content Service",
+      "item": [
+        {
+          "name": "Create Post (multipart)",
+          "event": [{ "listen": "test", "script": { "exec": [
+            "const res = pm.response.json();",
+            "if (res.id) { pm.collectionVariables.set('POST_ID', res.id); }",
+            "pm.test('Status 201', () => pm.response.to.have.status(201));",
+            "pm.test('Status published', () => pm.expect(res.status).to.eql('published'));"
+          ]}}],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{ACCESS_TOKEN}}" }],
+            "url": "{{CONTENT_URL}}/posts",
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                { "key": "caption",    "value": "Mi primer post #golang #microservices", "type": "text" },
+                { "key": "visibility", "value": "public", "type": "text" },
+                { "key": "media",      "type": "file", "src": [] }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Get Post by ID",
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('Status 200', () => pm.response.to.have.status(200));",
+            "pm.test('Status published', () => pm.expect(pm.response.json().status).to.eql('published'));"
+          ]}}],
+          "request": { "method": "GET", "url": "{{CONTENT_URL}}/posts/{{POST_ID}}" }
+        },
+        {
+          "name": "Delete Post",
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('Status 204', () => pm.response.to.have.status(204));"
+          ]}}],
+          "request": {
+            "method": "DELETE",
+            "header": [{ "key": "Authorization", "value": "Bearer {{ACCESS_TOKEN}}" }],
+            "url": "{{CONTENT_URL}}/posts/{{POST_ID}}"
+          }
+        }
+      ]
+    },
+    {
+      "name": "4. Feed Service",
+      "item": [
+        {
+          "name": "Get Feed User 2 (otrouser)",
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('Status 200', () => pm.response.to.have.status(200));",
+            "const res = pm.response.json();",
+            "console.log('Feed entries:', res.entries ? res.entries.length : 0);"
+          ]}}],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "X-User-ID", "value": "{{USER2_ID}}" }],
+            "url": { "raw": "{{FEED_URL}}/feed?limit=20", "query": [{ "key": "limit", "value": "20" }] }
+          }
+        },
+        {
+          "name": "Get Feed con cursor",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "X-User-ID", "value": "{{USER2_ID}}" }],
+            "url": { "raw": "{{FEED_URL}}/feed?limit=20&cursor={{next_cursor}}", "query": [
+              { "key": "limit", "value": "20" },
+              { "key": "cursor", "value": "{{next_cursor}}" }
+            ]}
+          }
+        }
+      ]
+    },
+    {
+      "name": "5. Notification Service",
+      "item": [
+        {
+          "name": "Get Notifications (User 2)",
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('Status 200', () => pm.response.to.have.status(200));",
+            "const res = pm.response.json();",
+            "console.log('Unread count:', res.unread_count);",
+            "if (res.notifications && res.notifications.length > 0) {",
+            "  pm.collectionVariables.set('NOTIF_ID', res.notifications[0].id);",
+            "}"
+          ]}}],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{ACCESS_TOKEN2}}" }],
+            "url": { "raw": "{{NOTIF_URL}}/notifications?limit=20", "query": [
+              { "key": "limit", "value": "20" }
+            ]}
+          }
+        },
+        {
+          "name": "Get Unread Notifications (User 2)",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{ACCESS_TOKEN2}}" }],
+            "url": { "raw": "{{NOTIF_URL}}/notifications?unread=true", "query": [
+              { "key": "unread", "value": "true" }
+            ]}
+          }
+        },
+        {
+          "name": "Mark Notification as Read",
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('Status 204', () => pm.response.to.have.status(204));"
+          ]}}],
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Authorization", "value": "Bearer {{ACCESS_TOKEN2}}" }],
+            "url": "{{NOTIF_URL}}/notifications/{{NOTIF_ID}}/read"
+          }
+        },
+        {
+          "name": "Mark All Notifications as Read",
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('Status 204', () => pm.response.to.have.status(204));"
+          ]}}],
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Authorization", "value": "Bearer {{ACCESS_TOKEN2}}" }],
+            "url": "{{NOTIF_URL}}/notifications/read-all"
+          }
+        }
+      ]
+    },
+    {
+      "name": "6. Health Checks",
+      "item": [
+        { "name": "Auth Health",         "request": { "method": "GET", "url": "{{AUTH_URL}}/health" } },
+        { "name": "Feed Health",         "request": { "method": "GET", "url": "{{FEED_URL}}/health" } },
+        { "name": "Content Health",      "request": { "method": "GET", "url": "{{CONTENT_URL}}/health" } },
+        { "name": "Social Health",       "request": { "method": "GET", "url": "{{SOCIAL_URL}}/health" } },
+        { "name": "Notification Health", "request": { "method": "GET", "url": "{{NOTIF_URL}}/health" } }
+      ]
+    }
+  ]
+}

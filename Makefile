@@ -86,4 +86,7 @@ nats-streams-ls:
 # ── NATS monitoring ───────────────────────────────────────────────────────────
 nats-info:
 	curl -s http://localhost:8222/varz | jq .
+
+logs-notification:
+	docker compose logs -f notification-service
 	
