@@ -5,6 +5,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/go-chi/cors"
 	"github.com/juantevez/my-ig/social-service/internal/infrastructure/http/handler"
 	socialmw "github.com/juantevez/my-ig/social-service/internal/infrastructure/http/middleware"
 )
@@ -12,6 +13,13 @@ import (
 func New(follow *handler.FollowHandler, jwtSecret string) http.Handler {
 	r := chi.NewRouter()
 
+	r.Use(cors.Handler(cors.Options{
+		AllowedOrigins:   []string{"http://localhost:5173"},
+		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-User-ID"},
+		AllowCredentials: false,
+		MaxAge:           300,
+	}))
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Logger)

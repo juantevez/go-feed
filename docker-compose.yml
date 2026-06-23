@@ -113,6 +113,22 @@ services:
       timeout: 5s
       retries: 5
 
+  # ── MinIO bucket setup ────────────────────────────────────────────────────────
+  minio-setup:
+    image: minio/mc:latest
+    container_name: my-ig-minio-setup
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+        mc alias set local http://minio:9000 minioadmin minioadmin &&
+        mc mb --ignore-existing local/my-ig-media &&
+        mc anonymous set download local/my-ig-media &&
+        echo 'bucket ready'
+      "
+    restart: on-failure
+
   # ── Migrate auth ──────────────────────────────────────────────────────────────
   migrate-auth:
     image: migrate/migrate:v4.18.1
@@ -244,6 +260,8 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
+      minio-setup:
+        condition: service_completed_successfully
       migrate-content:
         condition: service_completed_successfully
     environment:

@@ -115,7 +115,7 @@ func (p *Post) IsVisible() bool {
 
 // extractTags parsea hashtags del caption (#golang, #go, etc.)
 func extractTags(caption string) []string {
-	var tags []string
+	tags := []string{}
 	seen := make(map[string]bool)
 	for _, word := range strings.Fields(caption) {
 		if strings.HasPrefix(word, "#") {

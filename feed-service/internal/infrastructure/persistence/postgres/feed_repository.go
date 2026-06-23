@@ -122,6 +122,28 @@ func NewFollowerRepository(db *pgxpool.Pool) *FollowerRepository {
 	return &FollowerRepository{db: db}
 }
 
+// SaveFollower inserta o actualiza la relación follower → following.
+// ON CONFLICT actualiza last_seen_at para mantener el usuario "activo".
+func (r *FollowerRepository) SaveFollower(ctx context.Context, followerID, followingID uuid.UUID) error {
+	const q = `
+		INSERT INTO followers (follower_id, following_id, last_seen_at, created_at)
+		VALUES ($1, $2, NOW(), NOW())
+		ON CONFLICT (follower_id, following_id) DO UPDATE SET last_seen_at = NOW()`
+	if _, err := r.db.Exec(ctx, q, followerID, followingID); err != nil {
+		return fmt.Errorf("follower_repo.SaveFollower: %w", err)
+	}
+	return nil
+}
+
+// DeleteFollower elimina la relación follower → following.
+func (r *FollowerRepository) DeleteFollower(ctx context.Context, followerID, followingID uuid.UUID) error {
+	const q = `DELETE FROM followers WHERE follower_id = $1 AND following_id = $2`
+	if _, err := r.db.Exec(ctx, q, followerID, followingID); err != nil {
+		return fmt.Errorf("follower_repo.DeleteFollower: %w", err)
+	}
+	return nil
+}
+
 // GetActiveFollowers retorna los IDs de seguidores activos de un autor.
 // "Activos" = usuarios que han hecho login en los últimos 30 días.
 // Limita a 10k — por encima de eso el fan-in es más eficiente (fase 2).
