@@ -23,6 +23,17 @@ var ErrEmailAlreadyTaken = errors.New("email already taken")
 // ErrInvalidCredentials is returned on authentication failure.
 var ErrInvalidCredentials = errors.New("invalid credentials")
 
+// ValidationError is returned when User data breaks an invariant (bad username,
+// bad email...). It's the client's fault: adapters map it to 400 with Msg.
+type ValidationError struct {
+	Field string
+	Msg   string
+}
+
+func (e *ValidationError) Error() string { return e.Msg }
+
+func invalid(field, msg string) error { return &ValidationError{Field: field, Msg: msg} }
+
 // Role represents the authorization level of a user.
 type Role string
 
@@ -44,13 +55,19 @@ type User struct {
 	UpdatedAt    time.Time
 }
 
+// NormalizeEmail es la forma canónica de un email: sin espacios y en minúsculas.
+// Se aplica al guardar y al buscar, así "Juan@X.com" y "juan@x.com" son la misma cuenta.
+func NormalizeEmail(email string) string {
+	return strings.ToLower(strings.TrimSpace(email))
+}
+
 // New creates and validates a User aggregate.
 // The caller is responsible for hashing the password before passing it in.
 func New(username, email, passwordHash string) (*User, error) {
 	u := &User{
 		ID:           uuid.New(),
 		Username:     strings.TrimSpace(username),
-		Email:        strings.ToLower(strings.TrimSpace(email)),
+		Email:        NormalizeEmail(email),
 		PasswordHash: passwordHash,
 		Role:         RoleUser,
 		IsVerified:   false,
@@ -68,18 +85,19 @@ func New(username, email, passwordHash string) (*User, error) {
 // Called on construction and can be re-used in update operations.
 func (u *User) Validate() error {
 	if u.Username == "" {
-		return errors.New("username is required")
+		return invalid("username", "username is required")
 	}
 	if !usernameRegex.MatchString(u.Username) {
-		return errors.New("username must be 3–50 characters: letters, numbers or underscores")
+		return invalid("username", "username must be 3–50 characters: letters, numbers or underscores")
 	}
 	if u.Email == "" {
-		return errors.New("email is required")
+		return invalid("email", "email is required")
 	}
 	if !emailRegex.MatchString(u.Email) {
-		return errors.New("email format is invalid")
+		return invalid("email", "email format is invalid")
 	}
 	if u.PasswordHash == "" {
+		// Lo genera el use case, no el cliente: es un error interno, no de validación.
 		return errors.New("password hash is required")
 	}
 	return nil

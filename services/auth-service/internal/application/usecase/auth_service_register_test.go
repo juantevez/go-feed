@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/juantevez/my-ig/auth-service/internal/application/port/input"
@@ -178,8 +179,13 @@ func TestRegister_InvalidUsername(t *testing.T) {
 		Password: "supersecret123",
 	})
 
-	if err == nil {
-		t.Fatal("expected a validation error, got nil")
+	// Error tipado: el handler lo traduce a 400 (antes caía en 500).
+	var invalid *user.ValidationError
+	if !errors.As(err, &invalid) {
+		t.Fatalf("expected *user.ValidationError, got %v", err)
+	}
+	if invalid.Field != "username" {
+		t.Errorf("expected field username, got %q", invalid.Field)
 	}
 }
 
@@ -202,5 +208,87 @@ func TestRegister_RepoSaveFails(t *testing.T) {
 	}
 	if !errors.Is(err, dbErr) {
 		t.Errorf("expected wrapped dbErr, got %v", err)
+	}
+}
+
+// ── Login ─────────────────────────────────────────────────────────────────────
+
+func TestLogin_UnknownEmail_SameCostAsWrongPassword(t *testing.T) {
+	repo := &mockUserRepo{} // findByEmail nil → ErrUserNotFound
+	svc := usecase.NewAuthService(&mockTx{}, repo, nil, &mockPublisher{})
+	cmd := input.LoginCommand{Email: "ghost@example.com", Password: "whatever123"}
+
+	// La primera llamada genera el hash de relleno; medimos la segunda.
+	_, _ = svc.Login(context.Background(), cmd)
+
+	start := time.Now()
+	_, err := svc.Login(context.Background(), cmd)
+	elapsed := time.Since(start)
+
+	if !errors.Is(err, user.ErrInvalidCredentials) {
+		t.Fatalf("expected ErrInvalidCredentials, got %v", err)
+	}
+	// bcrypt con costo 12 tarda cientos de ms; sin el compare de relleno
+	// la respuesta era inmediata y revelaba que el email no existe.
+	if elapsed < 50*time.Millisecond {
+		t.Errorf("unknown email answered in %v: no bcrypt compare, timing leaks user existence", elapsed)
+	}
+}
+
+func TestLogin_RepoError_IsNotInvalidCredentials(t *testing.T) {
+	dbErr := errors.New("connection refused")
+	repo := &mockUserRepo{
+		findByEmail: func(_ context.Context, _ string) (*user.User, error) { return nil, dbErr },
+	}
+	svc := usecase.NewAuthService(&mockTx{}, repo, nil, &mockPublisher{})
+
+	_, err := svc.Login(context.Background(), input.LoginCommand{Email: "juan@example.com", Password: "whatever123"})
+
+	// Una caída de la DB es un 500, no un 401 que le diga al usuario que se equivocó.
+	if errors.Is(err, user.ErrInvalidCredentials) {
+		t.Fatal("repo error must not be reported as invalid credentials")
+	}
+	if !errors.Is(err, dbErr) {
+		t.Errorf("expected wrapped dbErr, got %v", err)
+	}
+}
+
+func TestLogin_EmailIsNormalized(t *testing.T) {
+	var looked string
+	repo := &mockUserRepo{
+		findByEmail: func(_ context.Context, email string) (*user.User, error) {
+			looked = email
+			return nil, user.ErrUserNotFound
+		},
+	}
+	svc := usecase.NewAuthService(&mockTx{}, repo, nil, &mockPublisher{})
+
+	_, _ = svc.Login(context.Background(), input.LoginCommand{Email: "  Juan@Example.COM ", Password: "whatever123"})
+
+	// El registro guarda el email normalizado: el login tiene que buscarlo igual.
+	if looked != "juan@example.com" {
+		t.Errorf("expected lookup by normalized email, got %q", looked)
+	}
+}
+
+func TestRegister_EmailCheckIsNormalized(t *testing.T) {
+	var checked string
+	repo := &mockUserRepo{
+		existsByEmail: func(_ context.Context, email string) (bool, error) {
+			checked = email
+			return true, nil
+		},
+	}
+	svc := usecase.NewAuthService(&mockTx{}, repo, nil, &mockPublisher{})
+
+	_, err := svc.Register(context.Background(), input.RegisterCommand{
+		Username: "juandev", Email: "Juan@Example.com", Password: "supersecret123",
+	})
+
+	if checked != "juan@example.com" {
+		t.Errorf("expected duplicate check by normalized email, got %q", checked)
+	}
+	if !errors.Is(err, user.ErrEmailAlreadyTaken) {
+		t.Errorf("expected ErrEmailAlreadyTaken, got %v", err)
 	}
 }

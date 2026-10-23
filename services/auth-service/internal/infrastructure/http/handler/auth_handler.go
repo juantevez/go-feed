@@ -57,7 +57,11 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 		Password: req.Password,
 	})
 	if err != nil {
+		var invalid *user.ValidationError
 		switch {
+		case errors.As(err, &invalid):
+			slog.Warn("register: invalid input", "request_id", reqID, "field", invalid.Field, "err", invalid.Msg)
+			respondError(w, http.StatusBadRequest, invalid.Msg)
 		case errors.Is(err, user.ErrEmailAlreadyTaken):
 			slog.Warn("register: email already taken", "request_id", reqID, "email", req.Email)
 			respondError(w, http.StatusConflict, "email already registered")

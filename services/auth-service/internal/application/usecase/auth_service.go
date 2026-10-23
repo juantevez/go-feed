@@ -2,7 +2,9 @@ package usecase
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"sync"
 
 	chimiddleware "github.com/go-chi/chi/v5/middleware"
 	"golang.org/x/crypto/bcrypt"
@@ -15,6 +17,17 @@ import (
 )
 
 const bcryptCost = 12
+
+// dummyHash es un hash bcrypt con el mismo costo que los reales. Login compara
+// contra él cuando el email no existe, para que esa respuesta tarde lo mismo que
+// una contraseña incorrecta y no revele qué emails están registrados.
+var dummyHash = sync.OnceValue(func() []byte {
+	h, err := bcrypt.GenerateFromPassword([]byte("dummy-password-for-timing"), bcryptCost)
+	if err != nil {
+		panic(fmt.Sprintf("auth: generate dummy hash: %v", err))
+	}
+	return h
+})
 
 // AuthService implements input.AuthUseCase.
 type AuthService struct {
@@ -36,7 +49,7 @@ func NewAuthService(
 // Register creates a new user account and hashes the password.
 // The user and the auth.user.registered.v1 event are persisted in the same tx (outbox).
 func (s *AuthService) Register(ctx context.Context, cmd input.RegisterCommand) (*input.RegisterResult, error) {
-	taken, err := s.users.ExistsByEmail(ctx, cmd.Email)
+	taken, err := s.users.ExistsByEmail(ctx, user.NormalizeEmail(cmd.Email))
 	if err != nil {
 		return nil, fmt.Errorf("register: check email: %w", err)
 	}
@@ -74,10 +87,15 @@ func (s *AuthService) Register(ctx context.Context, cmd input.RegisterCommand) (
 // Login verifies credentials and returns a fresh JWT pair.
 // The refresh token and the auth.user.logged_in.v1 event are persisted in the same tx (outbox).
 func (s *AuthService) Login(ctx context.Context, cmd input.LoginCommand) (*input.LoginResult, error) {
-	u, err := s.users.FindByEmail(ctx, cmd.Email)
-	if err != nil {
-		// Don't leak whether the email exists — always return same error.
+	u, err := s.users.FindByEmail(ctx, user.NormalizeEmail(cmd.Email))
+	if errors.Is(err, user.ErrUserNotFound) {
+		// Don't leak whether the email exists: same error AND same latency as a
+		// wrong password (the bcrypt compare is what dominates the response time).
+		_ = bcrypt.CompareHashAndPassword(dummyHash(), []byte(cmd.Password))
 		return nil, user.ErrInvalidCredentials
+	}
+	if err != nil {
+		return nil, fmt.Errorf("login: find user: %w", err)
 	}
 
 	if err := bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(cmd.Password)); err != nil {
