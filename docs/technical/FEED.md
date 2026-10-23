@@ -77,7 +77,7 @@ services/feed-service/
 └── internal/
     ├── domain/feed/
     │   ├── feed_entry.go                       # FeedEntry, Cursor, errores
-    │   └── repository.go                       # puertos feed.Repository, feed.FollowerRepository
+    │   └── repository.go                       # puerto feed.Repository
     ├── application/
     │   ├── port/input/  feed_usecase.go        # puerto driving: GetFeed
     │   │                fanout_usecase.go      # puerto driving: FanOut
@@ -86,7 +86,7 @@ services/feed-service/
     └── infrastructure/
         ├── http/        handler/ router/ middleware/   # adaptador HTTP (chi) + JWTMiddleware
         ├── messaging/natsconsumer/consumer.go  # adaptador driving: eventos → casos de uso
-        └── persistence/postgres/               # FeedRepository, FollowerRepository
+        └── persistence/postgres/               # FeedRepository; FollowerRepository (grafo local)
 ```
 
 El fan-out pasa por un caso de uso (`FanOutService`). Los otros tres eventos (borrado, follow,
@@ -206,12 +206,10 @@ sequenceDiagram
     alt post ya borrado
         Note over K: posts.deleted llego antes, no se inserta nada
     else post vivo
+        K->>DB: INSERT feed_entries del autor
         opt visibility = public
             K->>DB: INSERT author_posts ON CONFLICT DO NOTHING
-            K->>DB: SELECT seguidores con relacion activa, hasta 10000
-        end
-        loop batches de 500 destinatarios, autor incluido
-            K->>DB: INSERT feed_entries ON CONFLICT DO NOTHING
+            K->>DB: INSERT feed_entries SELECT de followers activos ON CONFLICT DO NOTHING
         end
     end
     K->>DB: COMMIT
@@ -222,10 +220,10 @@ sequenceDiagram
 - **Solo los posts `public` llegan a los seguidores** y entran a `author_posts`. `private` y
   `followers_only` quedan solo en el feed del autor (hasta que content-service pueda autorizar
   a seguidores, ver [CONTENT.md](CONTENT.md#visibilidad)).
-- **Idempotente:** un reproceso del mismo evento no duplica nada (`ON CONFLICT DO NOTHING`), así
-  que si falla a mitad de los batches, el reintento completa lo que faltaba.
-- **Todo el fan-out es una transacción** (cada batch es un `pgx.Batch`, un round-trip). O el
-  post llega a todos los feeds o a ninguno.
+- **Sin tope de seguidores:** el reparto a los seguidores es un solo `INSERT ... SELECT` sobre
+  `followers`; las filas no pasan por Go. Probado con 15 000 seguidores: llegó a todos.
+- **Idempotente:** un reproceso del mismo evento no duplica nada (`ON CONFLICT DO NOTHING`).
+- **Todo el fan-out es una transacción:** el post llega a todos los feeds o a ninguno.
 - **Lock y tombstone:** ver [borrado](#borrado-de-un-post).
 
 ### Follow y unfollow
@@ -326,7 +324,7 @@ sequenceDiagram
 | `feed_entries (user_id, score DESC, post_id DESC)` | Paginación del timeline. |
 | `feed_entries (post_id)` | Borrado de un post de todos los feeds. |
 | `feed_entries (user_id, author_id)` | Limpieza en unfollow. |
-| `followers (following_id, last_seen_at DESC)` | Seguidores de un autor (fan-out; usa el prefijo `following_id`). |
+| `followers (following_id, last_seen_at DESC)` | Seguidores de un autor (el `INSERT ... SELECT` del fan-out; usa el prefijo `following_id`). |
 | `author_posts (author_id, score DESC)` | Últimos posts de un autor (backfill). |
 
 Los repositorios usan `outbox.Conn(ctx, pool)`: si hay una transacción en el `ctx` la usan, si
@@ -372,7 +370,12 @@ En la DLQ el mensaje queda en `dlq.<tópico original>` con headers de contexto
 del original; si publicar en la DLQ falla, el mensaje se sigue reentregando.
 
 Los consumers se crean con `DeliverNew`: un durable nuevo procesa solo los eventos publicados
-desde que existe. `AckWait` es 30 s.
+desde que existe.
+
+**Handlers lentos:** el `AckWait` es 30 s, pero mientras el handler corre `shared/dlq` le avisa
+a JetStream cada 10 s que el mensaje sigue en proceso (`InProgress`), lo que reinicia el plazo.
+Un fan-out que tarde más de 30 s no recibe una reentrega del mismo mensaje en el medio. Probado
+con un handler de 45 s: 1 entrega con el aviso, 2 sin él.
 
 ---
 
@@ -400,8 +403,6 @@ Constantes de comportamiento (fijas en código):
 
 | Constante | Valor | Dónde |
 |---|---|---|
-| Tamaño de batch del fan-out | 500 | `fan_out.go` |
-| Máximo de seguidores por fan-out | 10 000 | `GetActiveFollowers` |
 | Posts cargados en el backfill | 20 | `consumer.go` |
 | `limit` de `GET /feed` | default 20, máximo 50 | `get_feed.go` |
 
@@ -423,8 +424,8 @@ make dlq-replay-all CONSUMER=feed-service-post-created
   lo republica al tópico original, así que le llega a **todos** los consumers de ese tópico (no
   solo al que falló); los de feed-service son idempotentes.
 - **Graceful shutdown:** con `SIGINT`/`SIGTERM` deja de aceptar requests HTTP (timeout de 15 s).
-  Las suscripciones no se drenan: un mensaje que se estaba procesando queda sin ack y JetStream
-  lo reentrega cuando vence el `AckWait` (30 s). Como los handlers son idempotentes, no se
+  Las suscripciones no se drenan: un mensaje que se estaba procesando queda sin ack (y sin
+  avisos de `InProgress`) y JetStream lo reentrega cuando vence el `AckWait` (30 s). Como los handlers son idempotentes, no se
   pierde ni se duplica nada.
 - **Tests:** [`fan_out_test.go`](../../services/feed-service/internal/application/usecase/fan_out_test.go)
   cubre el fan-out con fakes de los puertos: post público (autor + seguidores), privado (solo
@@ -439,7 +440,9 @@ El servicio está en etapa de desarrollo. Nada de esto es un bug: son piezas que
 conectaron y restos de código para limpiar.
 
 - **Fan-in para autores con muchos seguidores:** el tipo `feed.Strategy` (`fan_out` / `fan_in`)
-  existe para eso, sin uso. Hoy todo es fan-out.
+  existe para eso, sin uso. Hoy todo es fan-out, sin tope: para un autor con millones de
+  seguidores, el `INSERT ... SELECT` escribe millones de filas en una transacción, y ahí
+  conviene que sus posts se lean al pedir el feed en vez de repartirse.
 - **Ranking:** `score` está pensado para pasar de cronológico a un ranking (recencia,
   engagement, relación). Hoy es el timestamp.
 - **Fan-out selectivo por actividad:** la idea original era repartir solo a seguidores que
@@ -460,20 +463,4 @@ conectaron y restos de código para limpiar.
 
 ## Limitaciones conocidas
 
-Ordenadas por impacto.
-
-1. **Más de 10 000 seguidores se truncan sin aviso.** `GetActiveFollowers` corta en
-   10 000 ordenando por `follower_id`: los seguidores con UUID más alto nunca reciben los posts
-   de ese autor. No hay fan-in que los cubra.
-
-2. **Un fan-out largo puede pasar el `AckWait`.** El fan-out completo corre dentro del handler,
-   en una sola transacción (hasta 20 batches de 500), y el contexto no tiene timeout. Si tarda
-   más de 30 s, JetStream reentrega el mensaje mientras el primero sigue: la reentrega espera el
-   lock del post y después repite el trabajo (sin duplicar filas, por `ON CONFLICT`).
-
-3. **El cursor no aprovecha del todo el índice.** La página siguiente filtra con
-   `(score, post_id::text) < (...)`: el cast a texto impide usar el índice para el desempate por
-   `post_id`. El orden es correcto (el texto de un UUID ordena igual que el UUID); el costo es
-   de performance con feeds grandes.
-
-4. **CORS fijo a `http://localhost:5173`.** Igual que el resto de los servicios.
+- **CORS fijo a `http://localhost:5173`.** Igual que el resto de los servicios.

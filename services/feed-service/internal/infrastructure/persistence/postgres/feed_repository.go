@@ -43,8 +43,29 @@ func (r *FeedRepository) BulkInsert(ctx context.Context, entries []*feed.FeedEnt
 	return nil
 }
 
+// InsertForFollowers reparte el post a todos los seguidores con un INSERT ... SELECT:
+// las filas no pasan por Go, así que no hace falta tope ni batches, y un autor con
+// muchos seguidores no tiene una lista truncada. Usa idx_followers_following.
+func (r *FeedRepository) InsertForFollowers(ctx context.Context, postID, authorID uuid.UUID, publishedAt time.Time) (int64, error) {
+	const q = `
+		INSERT INTO feed_entries (user_id, post_id, author_id, score)
+		SELECT follower_id, $1, $2, $3
+		FROM followers
+		WHERE following_id = $2
+		  AND active
+		  AND follower_id <> $2
+		ON CONFLICT (user_id, post_id) DO NOTHING`
+	tag, err := outbox.Conn(ctx, r.db).Exec(ctx, q, postID, authorID, feed.Score(publishedAt))
+	if err != nil {
+		return 0, fmt.Errorf("feed_repo.InsertForFollowers: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
 // GetPage retorna entradas del feed paginadas con cursor-based pagination.
 // El cursor usa (score DESC, post_id) para manejar empates de timestamp.
+// La comparación de fila va sobre el uuid (no sobre su texto) para que entera sea
+// Index Cond de idx_fe_user_score, en el mismo orden que el ORDER BY.
 func (r *FeedRepository) GetPage(ctx context.Context, userID uuid.UUID, cursor *feed.Cursor, limit int) ([]*feed.FeedEntry, error) {
 	var (
 		rows pgx.Rows
@@ -66,10 +87,10 @@ func (r *FeedRepository) GetPage(ctx context.Context, userID uuid.UUID, cursor *
 			SELECT id, user_id, post_id, author_id, score, inserted_at
 			FROM feed_entries
 			WHERE user_id = $1
-			  AND (score, post_id::text) < ($2, $3)
+			  AND (score, post_id) < ($2, $3)
 			ORDER BY score DESC, post_id DESC
 			LIMIT $4`
-		rows, err = outbox.Conn(ctx, r.db).Query(ctx, q, userID, cursor.Score, cursor.PostID.String(), limit)
+		rows, err = outbox.Conn(ctx, r.db).Query(ctx, q, userID, cursor.Score, cursor.PostID, limit)
 	}
 
 	if err != nil {
@@ -143,8 +164,7 @@ func (r *FeedRepository) SaveAuthorPost(ctx context.Context, postID, authorID uu
 		INSERT INTO author_posts (post_id, author_id, score)
 		VALUES ($1, $2, $3)
 		ON CONFLICT (post_id) DO NOTHING`
-	score := float64(publishedAt.UTC().UnixMilli()) // mismo cálculo que feed.New
-	if _, err := outbox.Conn(ctx, r.db).Exec(ctx, q, postID, authorID, score); err != nil {
+	if _, err := outbox.Conn(ctx, r.db).Exec(ctx, q, postID, authorID, feed.Score(publishedAt)); err != nil {
 		return fmt.Errorf("feed_repo.SaveAuthorPost: %w", err)
 	}
 	return nil
@@ -189,8 +209,8 @@ func (r *FeedRepository) DeleteByAuthorFromUser(ctx context.Context, userID, aut
 
 // ── FollowerRepository ────────────────────────────────────────────────────────
 
-// FollowerRepository implementa feed.FollowerRepository.
-// Usa la tx del context si existe (outbox.Conn), así participa de TxManager.WithinTx.
+// FollowerRepository mantiene la copia local del grafo social (tabla followers),
+// que el fan-out lee con FeedRepository.InsertForFollowers. Usa la tx del context si existe (outbox.Conn), así participa de TxManager.WithinTx.
 // El feed-service lee el grafo social de su propia DB, replicado desde social-service
 // vía users.followed.v1 / users.unfollowed.v1.
 type FollowerRepository struct {
@@ -234,39 +254,4 @@ func (r *FollowerRepository) MarkUnfollowed(ctx context.Context, followerID, fol
 		return false, fmt.Errorf("follower_repo.MarkUnfollowed: %w", err)
 	}
 	return tag.RowsAffected() > 0, nil
-}
-
-// GetActiveFollowers retorna los IDs de quienes siguen hoy al autor (relación
-// activa, sin tombstone de unfollow).
-//
-// No filtra por actividad reciente: last_seen_at solo se setea al seguir, y
-// filtrar por él cortaba el fan-out a los 30 días del follow. Un fan-out selectivo
-// por actividad necesita además fan-in al leer, para que quien vuelve no encuentre
-// huecos en su feed.
-//
-// Limita a 10k — por encima de eso el fan-in es más eficiente (fase 2).
-func (r *FollowerRepository) GetActiveFollowers(ctx context.Context, authorID uuid.UUID) ([]uuid.UUID, error) {
-	const q = `
-		SELECT follower_id
-		FROM followers
-		WHERE following_id = $1
-		  AND active
-		ORDER BY follower_id
-		LIMIT 10000`
-
-	rows, err := outbox.Conn(ctx, r.db).Query(ctx, q, authorID)
-	if err != nil {
-		return nil, fmt.Errorf("follower_repo.GetActiveFollowers: %w", err)
-	}
-	defer rows.Close()
-
-	var ids []uuid.UUID
-	for rows.Next() {
-		var id uuid.UUID
-		if err := rows.Scan(&id); err != nil {
-			return nil, fmt.Errorf("follower_repo.GetActiveFollowers scan: %w", err)
-		}
-		ids = append(ids, id)
-	}
-	return ids, rows.Err()
 }

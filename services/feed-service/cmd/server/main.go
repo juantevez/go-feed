@@ -59,7 +59,7 @@ func main() {
 
 	// ── Use cases ────────────────────────────────────────────────────────────
 	getFeedSvc := usecase.NewGetFeedService(feedRepo)
-	fanOutSvc := usecase.NewFanOutService(txManager, feedRepo, followerRepo)
+	fanOutSvc := usecase.NewFanOutService(txManager, feedRepo)
 
 	// ── NATS streams ─────────────────────────────────────────────────────────
 	if err := ensureStreams(js); err != nil {

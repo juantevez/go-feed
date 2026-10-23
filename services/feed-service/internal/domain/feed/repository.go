@@ -25,6 +25,11 @@ type Repository interface {
 	// (author_posts). Idempotente.
 	SaveAuthorPost(ctx context.Context, postID, authorID uuid.UUID, publishedAt time.Time) error
 
+	// InsertForFollowers agrega el post al feed de todos los que siguen al autor
+	// (relación activa), en una sola operación y sin tope de seguidores. No incluye
+	// al autor. Ignora duplicados. Retorna cuántas entradas insertó.
+	InsertForFollowers(ctx context.Context, postID, authorID uuid.UUID, publishedAt time.Time) (int64, error)
+
 	// BulkInsert inserta múltiples FeedEntry en una sola operación.
 	// Usado por el fan-out worker al propagar un nuevo post.
 	// Ignora duplicados (ON CONFLICT DO NOTHING) para idempotencia.
@@ -42,12 +47,4 @@ type Repository interface {
 	// DeleteByAuthorFromUser elimina las entradas de un autor específico
 	// del feed de un usuario (usado en unfollow).
 	DeleteByAuthorFromUser(ctx context.Context, userID, authorID uuid.UUID) error
-}
-
-// FollowerRepository es el puerto para consultar el grafo social.
-// El feed-service no gestiona follows — los consulta como read-only.
-type FollowerRepository interface {
-	// GetActiveFollowers retorna los IDs de quienes siguen hoy al autor
-	// (relación activa, no los que dejaron de seguirlo).
-	GetActiveFollowers(ctx context.Context, authorID uuid.UUID) ([]uuid.UUID, error)
 }

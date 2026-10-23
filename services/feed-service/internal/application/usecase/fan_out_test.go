@@ -20,6 +20,7 @@ func (t *fakeTx) WithinTx(ctx context.Context, fn func(ctx context.Context) erro
 }
 
 type fakeFeeds struct {
+	followers   []uuid.UUID // seguidores del autor, para InsertForFollowers
 	deleted     map[uuid.UUID]bool
 	locked      []uuid.UUID
 	inserted    []*feed.FeedEntry
@@ -41,6 +42,16 @@ func (f *fakeFeeds) SaveAuthorPost(_ context.Context, postID, _ uuid.UUID, _ tim
 	f.authorPosts = append(f.authorPosts, postID)
 	return nil
 }
+func (f *fakeFeeds) InsertForFollowers(_ context.Context, postID, authorID uuid.UUID, publishedAt time.Time) (int64, error) {
+	for _, id := range f.followers {
+		e, err := feed.New(id, postID, authorID, publishedAt)
+		if err != nil {
+			return 0, err
+		}
+		f.inserted = append(f.inserted, e)
+	}
+	return int64(len(f.followers)), nil
+}
 func (f *fakeFeeds) BulkInsert(_ context.Context, entries []*feed.FeedEntry) error {
 	f.inserted = append(f.inserted, entries...)
 	return nil
@@ -51,16 +62,10 @@ func (f *fakeFeeds) GetPage(context.Context, uuid.UUID, *feed.Cursor, int) ([]*f
 func (f *fakeFeeds) DeleteByPostID(context.Context, uuid.UUID) error                    { return nil }
 func (f *fakeFeeds) DeleteByAuthorFromUser(context.Context, uuid.UUID, uuid.UUID) error { return nil }
 
-type fakeFollowers struct{ ids []uuid.UUID }
-
-func (f *fakeFollowers) GetActiveFollowers(context.Context, uuid.UUID) ([]uuid.UUID, error) {
-	return f.ids, nil
-}
-
 func newFanOut(followers ...uuid.UUID) (*FanOutService, *fakeTx, *fakeFeeds) {
 	tx := &fakeTx{}
-	feeds := &fakeFeeds{deleted: map[uuid.UUID]bool{}}
-	return NewFanOutService(tx, feeds, &fakeFollowers{ids: followers}), tx, feeds
+	feeds := &fakeFeeds{followers: followers, deleted: map[uuid.UUID]bool{}}
+	return NewFanOutService(tx, feeds), tx, feeds
 }
 
 func recipients(entries []*feed.FeedEntry) map[uuid.UUID]bool {

@@ -54,9 +54,16 @@ func New(userID, postID, authorID uuid.UUID, publishedAt time.Time) (*FeedEntry,
 		UserID:     userID,
 		PostID:     postID,
 		AuthorID:   authorID,
-		Score:      float64(publishedAt.UTC().UnixMilli()),
+		Score:      Score(publishedAt),
 		InsertedAt: time.Now().UTC(),
 	}, nil
+}
+
+// Score es el score cronológico de un post: su momento de publicación en ms Unix.
+// Lo usan todas las inserciones (fan-out, author_posts, backfill), así el orden es
+// el mismo venga de donde venga la entrada.
+func Score(publishedAt time.Time) float64 {
+	return float64(publishedAt.UTC().UnixMilli())
 }
 
 // Cursor es la posición de paginación cursor-based.
