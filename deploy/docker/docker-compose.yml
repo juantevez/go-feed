@@ -236,6 +236,7 @@ services:
       PORT: "8081"
       DB_DSN: "postgres://${FEED_DB_USER:-ig_user}:${FEED_DB_PASS:-ig_pass}@postgres-feed:5432/${FEED_DB_NAME:-ig_feed}?sslmode=disable"
       NATS_URL: "nats://nats:4222"
+      JWT_SECRET: ${JWT_SECRET:-changeme_in_production}
       LOG_LEVEL: "info"
     ports:
       - "8081:8081"

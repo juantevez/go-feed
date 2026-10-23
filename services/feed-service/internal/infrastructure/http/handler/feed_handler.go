@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/juantevez/my-ig/feed-service/internal/application/port/input"
 	"github.com/juantevez/my-ig/feed-service/internal/domain/feed"
+	"github.com/juantevez/my-ig/feed-service/internal/infrastructure/http/middleware"
 )
 
 // FeedHandler es el adaptador HTTP para FeedUseCase.
@@ -45,25 +46,19 @@ type feedResponse struct {
 //   - cursor: opaco, retornado en la respuesta anterior
 //   - limit:  número de entradas (1-50, default 20)
 //
-// Header requerido: X-User-ID (inyectado por el API Gateway desde el JWT)
+// Requiere Authorization: Bearer <access_token>. El feed es siempre el del
+// usuario del token: no hay forma de pedir el feed de otro.
 func (h *FeedHandler) GetFeed(w http.ResponseWriter, r *http.Request) {
 	reqID := chimiddleware.GetReqID(r.Context())
 
-	// En producción el API Gateway valida el JWT y propaga el user_id como header.
-	// En desarrollo el middleware local puede inyectarlo.
-	userIDStr := r.Header.Get("X-User-ID")
-	if userIDStr == "" {
-		slog.Warn("get_feed: missing X-User-ID header", "request_id", reqID)
-		respondError(w, http.StatusUnauthorized, "missing X-User-ID header")
+	claims, ok := middleware.ClaimsFromContext(r.Context())
+	if !ok {
+		slog.Warn("get_feed: unauthorized", "request_id", reqID)
+		respondError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
-
-	userID, err := uuid.Parse(userIDStr)
-	if err != nil {
-		slog.Warn("get_feed: invalid X-User-ID", "request_id", reqID, "raw", userIDStr)
-		respondError(w, http.StatusBadRequest, "invalid X-User-ID")
-		return
-	}
+	userID := claims.Sub
+	var err error
 
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 

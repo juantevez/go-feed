@@ -7,15 +7,16 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
 	"github.com/juantevez/my-ig/feed-service/internal/infrastructure/http/handler"
+	feedmw "github.com/juantevez/my-ig/feed-service/internal/infrastructure/http/middleware"
 )
 
-func New(feed *handler.FeedHandler) http.Handler {
+func New(feed *handler.FeedHandler, jwtSecret string, revoked feedmw.RevocationChecker) http.Handler {
 	r := chi.NewRouter()
 
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   []string{"http://localhost:5173"},
 		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-User-ID"},
+		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type"},
 		AllowCredentials: false,
 		MaxAge:           300,
 	}))
@@ -32,8 +33,11 @@ func New(feed *handler.FeedHandler) http.Handler {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	// Feed — el X-User-ID lo inyecta el API Gateway desde el JWT validado.
-	r.Get("/feed", feed.GetFeed)
+	// Feed del usuario autenticado: el user_id sale del JWT (claim sub).
+	r.Group(func(r chi.Router) {
+		r.Use(feedmw.JWTMiddleware(jwtSecret, revoked))
+		r.Get("/feed", feed.GetFeed)
+	})
 
 	return r
 }

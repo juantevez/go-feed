@@ -11,6 +11,12 @@ type Config struct {
 	HTTP HTTPConfig
 	DB   DBConfig
 	NATS NATSConfig
+	JWT  JWTConfig
+}
+
+// JWTConfig: feed-service solo valida access tokens emitidos por auth-service.
+type JWTConfig struct {
+	Secret string
 }
 
 type HTTPConfig struct {
@@ -37,6 +43,7 @@ func Load() (*Config, error) {
 
 	dsn := requireEnv("DB_DSN", &errs)
 	natsURL := requireEnv("NATS_URL", &errs)
+	jwtSecret := requireEnv("JWT_SECRET", &errs)
 
 	if len(errs) > 0 {
 		return nil, fmt.Errorf("config: %w", errors.Join(errs...))
@@ -59,6 +66,7 @@ func Load() (*Config, error) {
 			URL:            natsURL,
 			ConnectTimeout: parseDuration("NATS_CONNECT_TIMEOUT", 5*time.Second),
 		},
+		JWT: JWTConfig{Secret: jwtSecret},
 	}, nil
 }
 

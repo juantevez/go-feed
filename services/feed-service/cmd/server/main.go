@@ -21,6 +21,7 @@ import (
 	natsconsumer "github.com/juantevez/my-ig/feed-service/internal/infrastructure/messaging/natsconsumer"
 	"github.com/juantevez/my-ig/feed-service/internal/infrastructure/persistence/postgres"
 	"github.com/juantevez/my-ig/shared/outbox"
+	"github.com/juantevez/my-ig/shared/revocation"
 )
 
 func main() {
@@ -75,7 +76,14 @@ func main() {
 
 	// ── HTTP ─────────────────────────────────────────────────────────────────
 	feedHandler := handler.NewFeedHandler(getFeedSvc)
-	httpRouter := router.New(feedHandler)
+	// ── Revocación de tokens (logout) ─────────────────────────────────────────
+	denylist, err := revocation.New(js)
+	if err != nil {
+		slog.Error("revocation denylist error", "err", err)
+		os.Exit(1)
+	}
+	defer denylist.Stop()
+	httpRouter := router.New(feedHandler, cfg.JWT.Secret, denylist)
 
 	srv := &http.Server{
 		Addr:         fmt.Sprintf(":%s", cfg.HTTP.Port),
