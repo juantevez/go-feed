@@ -30,5 +30,10 @@ func (s *PostService) ListUserPosts(ctx context.Context, q input.ListUserPostsQu
 		return nil, fmt.Errorf("list_user_posts: %w", err)
 	}
 
+	for _, p := range posts {
+		if err := s.presignPrivateMedia(ctx, p); err != nil {
+			return nil, fmt.Errorf("list_user_posts: %w", err)
+		}
+	}
 	return &input.ListUserPostsResult{Posts: posts}, nil
 }

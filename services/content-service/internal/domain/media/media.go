@@ -2,8 +2,7 @@ package media
 
 import (
 	"errors"
-	"path/filepath"
-	"strings"
+	"fmt"
 
 	"github.com/google/uuid"
 )
@@ -16,17 +15,51 @@ const (
 	TypeVideo Type = "video"
 )
 
-// MaxFileSizeBytes es el límite de tamaño de archivo (50 MB).
-const MaxFileSizeBytes = 50 * 1024 * 1024
+// Límites de tamaño por archivo, según el tipo.
+const (
+	MaxImageSizeBytes = 8 * 1024 * 1024
+	MaxVideoSizeBytes = 50 * 1024 * 1024
+)
 
-// allowedMIMETypes lista los MIME types aceptados.
-// La validación es sobre el contenido real, no solo la extensión.
-var allowedMIMETypes = map[string]Type{
-	"image/jpeg": TypeImage,
-	"image/png":  TypeImage,
-	"image/webp": TypeImage,
-	"video/mp4":  TypeVideo,
-	"video/webm": TypeVideo,
+var maxSizeBytes = map[Type]int64{
+	TypeImage: MaxImageSizeBytes,
+	TypeVideo: MaxVideoSizeBytes,
+}
+
+// Prefijos de las keys en el bucket. Solo PublicPrefix tiene lectura anónima;
+// la media de posts no públicos se sirve con URLs prefirmadas.
+const (
+	PublicPrefix  = "posts/"
+	PrivatePrefix = "private/posts/"
+)
+
+var (
+	ErrUnsupportedType = errors.New("unsupported media type (allowed: image/jpeg, image/png, image/webp, video/mp4, video/webm)")
+	ErrFileTooLarge    = errors.New("file too large")
+)
+
+// FileError asocia un error de validación al archivo que lo produjo,
+// para que el cliente sepa cuál de los archivos subidos rechazar.
+type FileError struct {
+	Filename string
+	Err      error
+}
+
+func (e *FileError) Error() string { return e.Filename + ": " + e.Err.Error() }
+func (e *FileError) Unwrap() error { return e.Err }
+
+type format struct {
+	mediaType Type
+	ext       string
+}
+
+// allowedMIMETypes lista los MIME types aceptados y la extensión de su S3 key.
+var allowedMIMETypes = map[string]format{
+	"image/jpeg": {TypeImage, ".jpg"},
+	"image/png":  {TypeImage, ".png"},
+	"image/webp": {TypeImage, ".webp"},
+	"video/mp4":  {TypeVideo, ".mp4"},
+	"video/webm": {TypeVideo, ".webm"},
 }
 
 // Media representa un archivo adjunto a un post.
@@ -42,27 +75,36 @@ type Media struct {
 }
 
 // New valida y construye un Media listo para subir.
-func New(postID uuid.UUID, filename, mimeType string, sizeBytes int64) (*Media, error) {
+// mimeType debe ser el detectado a partir del contenido del archivo, no el que
+// declara el cliente: la extensión de la key sale de ahí, no de filename.
+// private indica que el post no es público: la key va bajo PrivatePrefix.
+func New(postID uuid.UUID, private bool, filename, mimeType string, sizeBytes int64) (*Media, error) {
 	if postID == uuid.Nil {
 		return nil, errors.New("postID is required")
 	}
-	if sizeBytes > MaxFileSizeBytes {
-		return nil, errors.New("file exceeds maximum size of 50MB")
-	}
 
-	mediaType, ok := allowedMIMETypes[strings.ToLower(mimeType)]
+	f, ok := allowedMIMETypes[mimeType]
 	if !ok {
-		return nil, errors.New("unsupported media type: " + mimeType)
+		return nil, &FileError{Filename: filename, Err: ErrUnsupportedType}
+	}
+	if limit := maxSizeBytes[f.mediaType]; sizeBytes > limit {
+		return nil, &FileError{
+			Filename: filename,
+			Err:      fmt.Errorf("%w (max %dMB for %ss)", ErrFileTooLarge, limit>>20, f.mediaType),
+		}
 	}
 
+	prefix := PublicPrefix
+	if private {
+		prefix = PrivatePrefix
+	}
 	id := uuid.New()
-	ext := filepath.Ext(filename)
-	s3Key := "posts/" + postID.String() + "/" + id.String() + ext
+	s3Key := prefix + postID.String() + "/" + id.String() + f.ext
 
 	return &Media{
 		ID:        id,
 		PostID:    postID,
-		Type:      mediaType,
+		Type:      f.mediaType,
 		MIMEType:  mimeType,
 		SizeBytes: sizeBytes,
 		Filename:  filename,

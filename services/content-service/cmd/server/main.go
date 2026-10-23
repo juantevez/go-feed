@@ -53,9 +53,15 @@ func main() {
 	defer nc.Close()
 
 	// ── S3 / MinIO ────────────────────────────────────────────────────────────
-	s3Client, err := connectS3(cfg.S3)
+	s3Client, err := connectS3(cfg.S3, cfg.S3.Endpoint)
 	if err != nil {
 		slog.Error("s3 connect error", "err", err)
+		os.Exit(1)
+	}
+	// Firma las URLs de la media privada con el endpoint que ve el navegador.
+	s3PresignClient, err := connectS3(cfg.S3, cfg.S3.PresignEndpoint)
+	if err != nil {
+		slog.Error("s3 presign client error", "err", err)
 		os.Exit(1)
 	}
 
@@ -67,7 +73,7 @@ func main() {
 
 	// ── Adaptadores ───────────────────────────────────────────────────────────
 	postRepo := postgres.NewPostRepository(db)
-	mediaStore := s3store.New(s3Client, cfg.S3.Bucket, cfg.S3.BaseURL)
+	mediaStore := s3store.New(s3Client, s3PresignClient, cfg.S3.Bucket, cfg.S3.BaseURL)
 	txManager := outbox.NewTxManager(db)
 	publisher := outbox.NewPublisher("content-service") // escribe en la tabla outbox, no en NATS
 
@@ -186,7 +192,7 @@ func connectNATS(cfg configs.NATSConfig) (nats.JetStreamContext, *nats.Conn, err
 	return js, nc, nil
 }
 
-func connectS3(cfg configs.S3Config) (*awss3.Client, error) {
+func connectS3(cfg configs.S3Config, endpoint string) (*awss3.Client, error) {
 	optFns := []func(*awsconfig.LoadOptions) error{
 		awsconfig.WithRegion(cfg.Region),
 		awsconfig.WithCredentialsProvider(
@@ -196,14 +202,14 @@ func connectS3(cfg configs.S3Config) (*awss3.Client, error) {
 
 	awsCfg, err := awsconfig.LoadDefaultConfig(context.Background(), optFns...)
 	if err != nil {
-		return nil, fmt.Errorf("aws config: %w", err)
+		return nil, fmt.Errorf("s3 client config: %w", err)
 	}
 
 	clientOpts := []func(*awss3.Options){}
-	if cfg.Endpoint != "" {
-		// MinIO o cualquier S3-compatible local
+	if endpoint != "" {
+		// Endpoint de MinIO (sin él, el SDK apuntaría a AWS)
 		clientOpts = append(clientOpts, func(o *awss3.Options) {
-			o.BaseEndpoint = &cfg.Endpoint
+			o.BaseEndpoint = &endpoint
 			o.UsePathStyle = true // MinIO requiere path-style
 		})
 	}

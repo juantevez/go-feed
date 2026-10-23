@@ -15,15 +15,19 @@ func (s *PostService) GetPost(ctx context.Context, q input.GetPostQuery) (*input
 		return nil, fmt.Errorf("get_post: %w", err)
 	}
 
-	// El autor siempre puede ver su propio post.
-	if p.AuthorID == q.RequestingUser {
-		return &input.GetPostResult{Post: p}, nil
-	}
-
-	// Otros usuarios solo ven posts públicos y publicados.
-	if !p.IsVisible() {
+	// Un post borrado no existe para nadie, tampoco para el autor.
+	if p.Status == post.StatusDeleted {
 		return nil, post.ErrPostNotFound
 	}
 
+	// El autor puede ver su propio post aunque no sea público;
+	// otros usuarios solo ven posts públicos y publicados.
+	if p.AuthorID != q.RequestingUser && !p.IsVisible() {
+		return nil, post.ErrPostNotFound
+	}
+
+	if err := s.presignPrivateMedia(ctx, p); err != nil {
+		return nil, fmt.Errorf("get_post: %w", err)
+	}
 	return &input.GetPostResult{Post: p}, nil
 }

@@ -14,6 +14,7 @@ type MediaStore interface {
 	// Delete elimina un archivo del store por su key o por la URL pública devuelta por Upload.
 	Delete(ctx context.Context, key string) error
 
-	// PresignedURL genera una URL firmada con TTL para acceso temporal.
+	// PresignedURL genera una URL firmada con TTL para acceso temporal, por key o
+	// por URL pública. Es la única forma de leer la media de posts no públicos.
 	PresignedURL(ctx context.Context, key string) (string, error)
 }

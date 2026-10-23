@@ -37,10 +37,13 @@ type NATSConfig struct {
 type S3Config struct {
 	Bucket    string
 	Region    string
-	Endpoint  string // para MinIO local; vacío en AWS real
+	Endpoint  string // URL de MinIO, ej. http://minio:9000
 	BaseURL   string // URL pública del bucket
-	AccessKey string // minioadmin en local; AWS key en producción
+	AccessKey string // credenciales de MinIO (minioadmin en el compose)
 	SecretKey string
+	// PresignEndpoint firma las URLs prefirmadas: tiene que ser el host que
+	// alcanza el navegador (la firma lo incluye). Default: Endpoint.
+	PresignEndpoint string
 }
 
 type JWTConfig struct {
@@ -81,12 +84,13 @@ func Load() (*Config, error) {
 			ConnectTimeout: parseDuration("NATS_CONNECT_TIMEOUT", 5*time.Second),
 		},
 		S3: S3Config{
-			Bucket:    bucket,
-			Region:    region,
-			Endpoint:  os.Getenv("S3_ENDPOINT"),
-			BaseURL:   baseURL,
-			AccessKey: accessKey,
-			SecretKey: secretKey,
+			Bucket:          bucket,
+			Region:          region,
+			Endpoint:        os.Getenv("S3_ENDPOINT"),
+			PresignEndpoint: envOr("S3_PRESIGN_ENDPOINT", os.Getenv("S3_ENDPOINT")),
+			BaseURL:         baseURL,
+			AccessKey:       accessKey,
+			SecretKey:       secretKey,
 		},
 		JWT: JWTConfig{Secret: jwtSecret},
 	}, nil

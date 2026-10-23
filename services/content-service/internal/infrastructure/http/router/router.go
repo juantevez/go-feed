@@ -32,8 +32,9 @@ func New(posts *handler.PostHandler, jwtSecret string, revoked contentmw.Revocat
 		w.WriteHeader(http.StatusOK)
 	})
 
-	// GET /posts/{id} — público (sin JWT, visibilidad manejada en el use case)
-	r.Get("/posts/{id}", posts.GetPost)
+	// GET /posts/{id} — público; el JWT es opcional y solo sirve para que el autor
+	// vea sus posts no públicos (visibilidad manejada en el use case)
+	r.With(contentmw.OptionalJWTMiddleware(jwtSecret, revoked)).Get("/posts/{id}", posts.GetPost)
 
 	// Rutas protegidas — requieren JWT válido de auth-service
 	r.Group(func(r chi.Router) {

@@ -9,12 +9,15 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
-	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 )
 
 const presignTTL = 1 * time.Hour
 
-// Store implementa output.MediaStore sobre AWS S3 (o compatible: MinIO, R2).
+// Store implementa output.MediaStore sobre MinIO, vía su API compatible con S3
+// (por eso el cliente es el AWS SDK).
+//
+// Los objetos se suben sin ACL: quién puede leerlos lo decide la política del
+// bucket (lectura anónima solo para media.PublicPrefix).
 type Store struct {
 	client  *awss3.Client
 	presign *awss3.PresignClient
@@ -22,10 +25,14 @@ type Store struct {
 	baseURL string
 }
 
-func New(client *awss3.Client, bucket, baseURL string) *Store {
+// New recibe dos clientes: client habla con S3 desde el servicio y presignClient
+// firma las URLs que abre el navegador. En local difieren en el endpoint
+// (minio:9000 dentro de Docker, localhost:9000 desde el host); la firma incluye
+// el host, así que tiene que ser el que va a usar el navegador.
+func New(client, presignClient *awss3.Client, bucket, baseURL string) *Store {
 	return &Store{
 		client:  client,
-		presign: awss3.NewPresignClient(client),
+		presign: awss3.NewPresignClient(presignClient),
 		bucket:  bucket,
 		baseURL: baseURL,
 	}
@@ -39,7 +46,6 @@ func (s *Store) Upload(ctx context.Context, key string, r io.Reader, mimeType st
 		Body:          r,
 		ContentType:   aws.String(mimeType),
 		ContentLength: aws.Int64(sizeBytes),
-		ACL:           types.ObjectCannedACLPublicRead,
 	})
 	if err != nil {
 		return "", fmt.Errorf("s3.Upload: %w", err)
@@ -50,10 +56,9 @@ func (s *Store) Upload(ctx context.Context, key string, r io.Reader, mimeType st
 // Delete elimina un objeto del bucket. Acepta la key o la URL pública que
 // devolvió Upload (los posts solo guardan la URL).
 func (s *Store) Delete(ctx context.Context, key string) error {
-	key = strings.TrimPrefix(key, s.baseURL+"/")
 	_, err := s.client.DeleteObject(ctx, &awss3.DeleteObjectInput{
 		Bucket: aws.String(s.bucket),
-		Key:    aws.String(key),
+		Key:    aws.String(s.keyOf(key)),
 	})
 	if err != nil {
 		return fmt.Errorf("s3.Delete: %w", err)
@@ -62,13 +67,19 @@ func (s *Store) Delete(ctx context.Context, key string) error {
 }
 
 // PresignedURL genera una URL firmada temporal para acceso privado.
+// Acepta la key o la URL pública que devolvió Upload.
 func (s *Store) PresignedURL(ctx context.Context, key string) (string, error) {
 	req, err := s.presign.PresignGetObject(ctx, &awss3.GetObjectInput{
 		Bucket: aws.String(s.bucket),
-		Key:    aws.String(key),
+		Key:    aws.String(s.keyOf(key)),
 	}, awss3.WithPresignExpires(presignTTL))
 	if err != nil {
 		return "", fmt.Errorf("s3.PresignedURL: %w", err)
 	}
 	return req.URL, nil
+}
+
+// keyOf le quita a una URL pública el prefijo baseURL; una key queda igual.
+func (s *Store) keyOf(keyOrURL string) string {
+	return strings.TrimPrefix(keyOrURL, s.baseURL+"/")
 }

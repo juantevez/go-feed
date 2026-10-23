@@ -2,6 +2,7 @@ package post
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -9,10 +10,12 @@ import (
 )
 
 var (
-	ErrPostNotFound   = errors.New("post not found")
-	ErrNotAuthor      = errors.New("only the author can modify this post")
-	ErrAlreadyDeleted = errors.New("post already deleted")
-	ErrInvalidCaption = errors.New("caption exceeds maximum length")
+	ErrPostNotFound      = errors.New("post not found")
+	ErrNotAuthor         = errors.New("only the author can modify this post")
+	ErrAlreadyDeleted    = errors.New("post already deleted")
+	ErrInvalidCaption    = errors.New("caption exceeds maximum length")
+	ErrInvalidVisibility = errors.New("invalid visibility (allowed: public, followers_only, private)")
+	ErrTooManyMedia      = fmt.Errorf("too many media files (max %d)", MaxMediaPerPost)
 )
 
 // Status representa el ciclo de vida de un post.
@@ -35,6 +38,9 @@ const (
 
 const maxCaptionLength = 2200 // límite estilo Instagram
 
+// MaxMediaPerPost es la cantidad máxima de archivos de media de un post.
+const MaxMediaPerPost = 10
+
 // Post es el agregado raíz del bounded context de contenido.
 type Post struct {
 	ID         uuid.UUID
@@ -42,7 +48,7 @@ type Post struct {
 	Caption    string
 	Status     Status
 	Visibility Visibility
-	MediaURLs  []string // URLs públicas de S3 (post-upload)
+	MediaURLs  []string // URLs de S3 (post-upload); en posts no públicos se leen con URL prefirmada
 	Tags       []string
 	CreatedAt  time.Time
 	UpdatedAt  time.Time
@@ -59,8 +65,12 @@ func New(authorID uuid.UUID, caption string, visibility Visibility) (*Post, erro
 	if len([]rune(caption)) > maxCaptionLength {
 		return nil, ErrInvalidCaption
 	}
-	if visibility == "" {
+	switch visibility {
+	case "":
 		visibility = VisibilityPublic
+	case VisibilityPublic, VisibilityFollowersOnly, VisibilityPrivate:
+	default:
+		return nil, ErrInvalidVisibility
 	}
 
 	now := time.Now().UTC()
@@ -86,6 +96,9 @@ func (p *Post) Publish(mediaURLs []string) error {
 	if len(mediaURLs) == 0 {
 		return errors.New("at least one media file is required to publish")
 	}
+	if len(mediaURLs) > MaxMediaPerPost {
+		return ErrTooManyMedia
+	}
 	p.MediaURLs = mediaURLs
 	p.Status = StatusPublished
 	p.UpdatedAt = time.Now().UTC()
@@ -106,6 +119,11 @@ func (p *Post) Delete(requestingUserID uuid.UUID) error {
 	p.DeletedAt = &now
 	p.UpdatedAt = now
 	return nil
+}
+
+// IsPublic retorna true si la visibilidad es pública: su media se sirve sin auth.
+func (p *Post) IsPublic() bool {
+	return p.Visibility == VisibilityPublic
 }
 
 // IsVisible retorna true si el post es visible públicamente.

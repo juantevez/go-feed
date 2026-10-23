@@ -2,8 +2,12 @@ package usecase
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"mime/multipart"
+	"net/http"
 
 	chimiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/juantevez/my-ig/content-service/internal/application/port/input"
@@ -32,10 +36,12 @@ func NewPostService(
 
 // CreatePost orquesta el flujo completo:
 //  1. Crea el agregado Post en draft
-//  2. Valida y sube cada archivo de media a S3
-//  3. Publica el post (draft → published)
-//  4. Persiste el post y el evento posts.created.v1 en la misma tx (outbox)
+//  2. Valida todos los archivos de media (tipo detectado por contenido, tamaño)
+//  3. Sube cada archivo a S3
+//  4. Publica el post (draft → published)
+//  5. Persiste el post y el evento posts.created.v1 en la misma tx (outbox)
 //
+// Se valida todo antes de subir nada: un archivo inválido no deja objetos en S3.
 // S3 no participa de la tx: si algo falla después de subir archivos,
 // se borran los ya subidos (compensación best-effort).
 func (s *PostService) CreatePost(ctx context.Context, cmd input.CreatePostCommand) (_ *input.CreatePostResult, err error) {
@@ -44,8 +50,24 @@ func (s *PostService) CreatePost(ctx context.Context, cmd input.CreatePostComman
 	if err != nil {
 		return nil, fmt.Errorf("create_post: build post: %w", err)
 	}
+	if len(cmd.Files) > post.MaxMediaPerPost {
+		return nil, fmt.Errorf("create_post: %w", post.ErrTooManyMedia)
+	}
 
-	// 2. Subir archivos de media a S3
+	// 2. Validar media
+	medias := make([]*media.Media, len(cmd.Files))
+	for i, fh := range cmd.Files {
+		mimeType, err := detectMIMEType(fh)
+		if err != nil {
+			return nil, fmt.Errorf("create_post: read file %s: %w", fh.Filename, err)
+		}
+		medias[i], err = media.New(p.ID, !p.IsPublic(), fh.Filename, mimeType, fh.Size)
+		if err != nil {
+			return nil, fmt.Errorf("create_post: validate media: %w", err)
+		}
+	}
+
+	// 3. Subir archivos de media a S3
 	var mediaURLs []string
 	defer func() {
 		if err != nil && len(mediaURLs) > 0 {
@@ -53,32 +75,20 @@ func (s *PostService) CreatePost(ctx context.Context, cmd input.CreatePostComman
 		}
 	}()
 
-	for _, fh := range cmd.Files {
-		f, err := fh.Open()
-		if err != nil {
-			return nil, fmt.Errorf("create_post: open file %s: %w", fh.Filename, err)
-		}
-		defer f.Close()
-
-		mimeType := fh.Header.Get("Content-Type")
-		m, err := media.New(p.ID, fh.Filename, mimeType, fh.Size)
-		if err != nil {
-			return nil, fmt.Errorf("create_post: validate media %s: %w", fh.Filename, err)
-		}
-
-		url, err := s.store.Upload(ctx, m.S3Key, f, m.MIMEType, m.SizeBytes)
+	for i, fh := range cmd.Files {
+		url, err := s.upload(ctx, fh, medias[i])
 		if err != nil {
 			return nil, fmt.Errorf("create_post: upload %s: %w", fh.Filename, err)
 		}
 		mediaURLs = append(mediaURLs, url)
 	}
 
-	// 3. Publicar (draft → published)
+	// 4. Publicar (draft → published)
 	if err := p.Publish(mediaURLs); err != nil {
 		return nil, fmt.Errorf("create_post: publish: %w", err)
 	}
 
-	// 4. Persistir post + evento atómicamente
+	// 5. Persistir post + evento atómicamente
 	traceID := chimiddleware.GetReqID(ctx)
 	err = s.tx.WithinTx(ctx, func(ctx context.Context) error {
 		if err := s.posts.Save(ctx, p); err != nil {
@@ -93,7 +103,40 @@ func (s *PostService) CreatePost(ctx context.Context, cmd input.CreatePostComman
 		return nil, err
 	}
 
+	if err := s.presignPrivateMedia(ctx, p); err != nil {
+		return nil, fmt.Errorf("create_post: %w", err)
+	}
 	return &input.CreatePostResult{Post: p}, nil
+}
+
+// sniffLen es lo que mira http.DetectContentType: no usa más de 512 bytes.
+const sniffLen = 512
+
+// detectMIMEType determina el tipo del archivo por sus primeros bytes (magic numbers).
+// El Content-Type que declara el cliente no se usa: se puede falsificar.
+func detectMIMEType(fh *multipart.FileHeader) (string, error) {
+	f, err := fh.Open()
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	head := make([]byte, sniffLen)
+	n, err := io.ReadFull(f, head)
+	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
+		return "", err
+	}
+	return http.DetectContentType(head[:n]), nil
+}
+
+// upload sube un archivo ya validado y retorna su URL pública.
+func (s *PostService) upload(ctx context.Context, fh *multipart.FileHeader, m *media.Media) (string, error) {
+	f, err := fh.Open()
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	return s.store.Upload(ctx, m.S3Key, f, m.MIMEType, m.SizeBytes)
 }
 
 // deleteMediaAsync borra archivos de S3 en background, sin bloquear la respuesta.

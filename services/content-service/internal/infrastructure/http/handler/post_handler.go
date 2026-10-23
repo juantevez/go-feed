@@ -3,6 +3,7 @@ package handler
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -12,11 +13,18 @@ import (
 	chimiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
 	"github.com/juantevez/my-ig/content-service/internal/application/port/input"
+	"github.com/juantevez/my-ig/content-service/internal/domain/media"
 	"github.com/juantevez/my-ig/content-service/internal/domain/post"
 	"github.com/juantevez/my-ig/content-service/internal/infrastructure/http/middleware"
 )
 
-const maxUploadSize = 50 << 20 // 50 MB por request (multipart total)
+const (
+	// maxRequestSize es el tope del body de POST /posts (todos los archivos + campos).
+	// Los límites por archivo y la cantidad de archivos los valida el dominio.
+	maxRequestSize = 100 << 20
+	// maxFormMemory es cuánto del multipart se guarda en memoria; el resto va a disco.
+	maxFormMemory = 10 << 20
+)
 
 // PostHandler es el adaptador HTTP para PostUseCase.
 type PostHandler struct {
@@ -42,11 +50,19 @@ func (h *PostHandler) CreatePost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := r.ParseMultipartForm(maxUploadSize); err != nil {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestSize)
+	if err := r.ParseMultipartForm(maxFormMemory); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			slog.Warn("create_post: request too large", "request_id", reqID, "author_id", claims.Sub)
+			respondError(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("request exceeds maximum size of %dMB", maxRequestSize>>20))
+			return
+		}
 		slog.Warn("create_post: invalid multipart form", "request_id", reqID, "author_id", claims.Sub, "err", err)
-		respondError(w, http.StatusBadRequest, "request too large or invalid multipart form")
+		respondError(w, http.StatusBadRequest, "invalid multipart form")
 		return
 	}
+	defer func() { _ = r.MultipartForm.RemoveAll() }() // archivos temporales en disco
 
 	visibility := post.Visibility(r.FormValue("visibility"))
 	if visibility == "" {
@@ -74,10 +90,24 @@ func (h *PostHandler) CreatePost(w http.ResponseWriter, r *http.Request) {
 		TraceID:    r.Header.Get("X-Request-ID"),
 	})
 	if err != nil {
+		var fileErr *media.FileError
 		switch {
 		case errors.Is(err, post.ErrInvalidCaption):
 			slog.Warn("create_post: invalid caption", "request_id", reqID, "author_id", claims.Sub, "err", err)
-			respondError(w, http.StatusBadRequest, err.Error())
+			respondError(w, http.StatusBadRequest, post.ErrInvalidCaption.Error())
+		case errors.Is(err, post.ErrInvalidVisibility):
+			slog.Warn("create_post: invalid visibility", "request_id", reqID, "author_id", claims.Sub, "err", err)
+			respondError(w, http.StatusBadRequest, post.ErrInvalidVisibility.Error())
+		case errors.Is(err, post.ErrTooManyMedia):
+			slog.Warn("create_post: too many media files", "request_id", reqID, "author_id", claims.Sub, "file_count", len(files))
+			respondError(w, http.StatusBadRequest, post.ErrTooManyMedia.Error())
+		case errors.As(err, &fileErr):
+			slog.Warn("create_post: invalid media", "request_id", reqID, "author_id", claims.Sub, "err", err)
+			status := http.StatusBadRequest
+			if errors.Is(fileErr, media.ErrFileTooLarge) {
+				status = http.StatusRequestEntityTooLarge
+			}
+			respondError(w, status, fileErr.Error())
 		default:
 			slog.Error("create_post: unexpected error", "request_id", reqID, "author_id", claims.Sub, "err", err)
 			respondError(w, http.StatusInternalServerError, "failed to create post")

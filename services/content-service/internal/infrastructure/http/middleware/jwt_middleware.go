@@ -40,28 +40,51 @@ func JWTMiddleware(secret string, revoked RevocationChecker) func(http.Handler) 
 				respondError(w, http.StatusUnauthorized, "missing authorization header")
 				return
 			}
-
-			tokenStr := strings.TrimPrefix(raw, "Bearer ")
-			claims, err := parseToken(tokenStr, secret)
-			if err != nil {
-				switch {
-				case errors.Is(err, gojwt.ErrTokenExpired):
-					respondError(w, http.StatusUnauthorized, "token expired")
-				default:
-					respondError(w, http.StatusUnauthorized, "invalid token")
-				}
-				return
-			}
-
-			if revoked.IsRevoked(claims.JTI) {
-				respondError(w, http.StatusUnauthorized, "token revoked")
-				return
-			}
-
-			ctx := context.WithValue(r.Context(), claimsKey, claims)
-			next.ServeHTTP(w, r.WithContext(ctx))
+			authenticate(w, r, next, strings.TrimPrefix(raw, "Bearer "), secret, revoked)
 		})
 	}
+}
+
+// OptionalJWTMiddleware es para rutas públicas que cambian según quién pide
+// (ej. el autor ve sus posts no públicos): sin header el request sigue anónimo,
+// con header el token se valida igual que en JWTMiddleware.
+func OptionalJWTMiddleware(secret string, revoked RevocationChecker) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			raw := r.Header.Get("Authorization")
+			if raw == "" {
+				next.ServeHTTP(w, r)
+				return
+			}
+			if !strings.HasPrefix(raw, "Bearer ") {
+				respondError(w, http.StatusUnauthorized, "invalid authorization header")
+				return
+			}
+			authenticate(w, r, next, strings.TrimPrefix(raw, "Bearer "), secret, revoked)
+		})
+	}
+}
+
+// authenticate valida el token y, si es válido, sigue con los claims en el contexto.
+func authenticate(w http.ResponseWriter, r *http.Request, next http.Handler, tokenStr, secret string, revoked RevocationChecker) {
+	claims, err := parseToken(tokenStr, secret)
+	if err != nil {
+		switch {
+		case errors.Is(err, gojwt.ErrTokenExpired):
+			respondError(w, http.StatusUnauthorized, "token expired")
+		default:
+			respondError(w, http.StatusUnauthorized, "invalid token")
+		}
+		return
+	}
+
+	if revoked.IsRevoked(claims.JTI) {
+		respondError(w, http.StatusUnauthorized, "token revoked")
+		return
+	}
+
+	ctx := context.WithValue(r.Context(), claimsKey, claims)
+	next.ServeHTTP(w, r.WithContext(ctx))
 }
 
 // ClaimsFromContext extrae los claims del contexto.
