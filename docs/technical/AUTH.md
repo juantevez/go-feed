@@ -188,7 +188,10 @@ sequenceDiagram
     C->>A: POST /auth/login {email, password}
     A->>DB: SELECT user (por email)
     A->>A: bcrypt.Compare
-    A->>DB: BEGIN; INSERT refresh_tokens; INSERT outbox (logged_in); COMMIT
+    A->>DB: BEGIN
+    A->>DB: INSERT refresh_tokens
+    A->>DB: INSERT outbox (logged_in)
+    A->>DB: COMMIT
     A-->>C: {access_token, refresh_token}
 
     Note over C: el access token expira a los 15 min

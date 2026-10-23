@@ -26,34 +26,36 @@ cliente es el AWS SDK v2, las variables se llaman `S3_*` y el adaptador vive en 
 flowchart LR
     C["Cliente / front"]
 
-    subgraph content-service
+    subgraph CS [content-service]
         H["HTTP API :8082"]
-        R[Outbox relay]
+        R["Outbox relay"]
     end
 
-    PG[("postgres-content<br/>posts · outbox")]
-    S3[("MinIO<br/>bucket my-ig-media")]
+    subgraph STORE [Almacenamiento]
+        PG[("postgres-content<br/>posts, outbox")]
+        S3[("MinIO<br/>bucket my-ig-media")]
+    end
 
-    subgraph NATS JetStream
-        ST[["stream POSTS<br/>posts.&gt;"]]
+    subgraph NATS [NATS JetStream]
+        ST[["stream POSTS"]]
         KV[("KV REVOKED_TOKENS")]
     end
 
-    A[auth-service]
-    F[feed-service]
-    N[notification-service]
+    A["auth-service"]
+    F["feed-service"]
+    N["notification-service"]
 
-    C -- "HTTP + Bearer JWT" --> H
-    C -- "media pública: GET /my-ig-media/posts/... (proxy del front)<br/>media privada: URL prefirmada" --> S3
-    H -- "PutObject / DeleteObject<br/>(firma URLs sin llamar a S3)" --> S3
-    H -- "posts + outbox (misma tx)" --> PG
-    R -- "lee pendientes" --> PG
-    R -- "publish (Nats-Msg-Id = event_id)" --> ST
-    A -- "logout: escribe jti" --> KV
-    KV -. "Watch (copia en memoria)" .-> H
-    ST -- "posts.created.v1 / posts.deleted.v1" --> F
-    ST -- "posts.created.v1" --> N
-    C -- "GET /feed (solo post_ids)" --> F
+    C -->|HTTP con Bearer JWT| H
+    C -->|GET /feed, solo post_ids| F
+    C -.->|descarga de media| S3
+    H -->|posts y outbox en la misma tx| PG
+    H -->|PutObject, DeleteObject| S3
+    R -->|lee pendientes| PG
+    R -->|publica eventos| ST
+    A -->|logout escribe el jti| KV
+    KV -.->|Watch, copia en memoria| H
+    ST -->|posts.created.v1, posts.deleted.v1| F
+    ST -->|posts.created.v1| N
 ```
 
 - **Ningún servicio llama a content-service por HTTP**, y content-service no llama a ninguno.
@@ -131,9 +133,9 @@ Errores de dominio:
 
 ```mermaid
 stateDiagram-v2
-    [*] --> draft: post.New
-    draft --> published: Publish(mediaURLs) — requiere ≥ 1 media
-    published --> deleted: Delete(userID) — solo el autor
+    [*] --> draft : post.New
+    draft --> published : Publish, requiere al menos 1 media
+    published --> deleted : Delete, solo el autor
     deleted --> [*]
 ```
 
@@ -320,7 +322,10 @@ sequenceDiagram
         H->>S3: PutObject posts/{post_id}/{media_id}.ext
     end
     H->>H: Publish(mediaURLs) → published
-    H->>DB: BEGIN; INSERT posts; INSERT outbox (posts.created.v1); COMMIT
+    H->>DB: BEGIN
+    H->>DB: INSERT posts
+    H->>DB: INSERT outbox (posts.created.v1)
+    H->>DB: COMMIT
     H-->>C: 201 {post}
 
     Note over R,DB: cada 500 ms
@@ -360,7 +365,8 @@ sequenceDiagram
     H->>DB: SELECT post
     H->>H: p.Delete(sub) — ¿autor? ¿ya borrado?
     H->>DB: UPDATE posts SET status = 'deleted', deleted_at
-    H->>DB: INSERT outbox (posts.deleted.v1); COMMIT
+    H->>DB: INSERT outbox (posts.deleted.v1)
+    H->>DB: COMMIT
     H-->>C: 204
     H--)S3: DeleteObject por cada media_url (goroutine)
 
