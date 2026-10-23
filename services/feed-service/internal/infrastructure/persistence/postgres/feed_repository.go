@@ -37,7 +37,7 @@ func (r *FeedRepository) BulkInsert(ctx context.Context, entries []*feed.FeedEnt
 		batch.Queue(q, e.ID, e.UserID, e.PostID, e.AuthorID, e.Score, e.InsertedAt)
 	}
 
-	if err := r.db.SendBatch(ctx, batch).Close(); err != nil {
+	if err := outbox.Conn(ctx, r.db).SendBatch(ctx, batch).Close(); err != nil {
 		return fmt.Errorf("feed_repo.BulkInsert: %w", err)
 	}
 	return nil
@@ -100,6 +100,40 @@ func (r *FeedRepository) DeleteByPostID(ctx context.Context, postID uuid.UUID) e
 		return fmt.Errorf("feed_repo.DeleteByPostID: %w", err)
 	}
 	return nil
+}
+
+// LockPost toma un advisory lock de transacción sobre el post: create y delete
+// del mismo post corren de a uno, así el chequeo del tombstone no tiene carrera.
+// Fuera de una tx el lock se liberaría en el acto, por eso lo exige.
+func (r *FeedRepository) LockPost(ctx context.Context, postID uuid.UUID) error {
+	const q = `SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))`
+	if _, err := outbox.Conn(ctx, r.db).Exec(ctx, q, postID); err != nil {
+		return fmt.Errorf("feed_repo.LockPost: %w", err)
+	}
+	return nil
+}
+
+// MarkPostDeleted registra el tombstone del post. ON CONFLICT lo hace idempotente
+// ante reentregas de posts.deleted.
+func (r *FeedRepository) MarkPostDeleted(ctx context.Context, postID uuid.UUID, deletedAt time.Time) error {
+	const q = `
+		INSERT INTO deleted_posts (post_id, deleted_at)
+		VALUES ($1, $2)
+		ON CONFLICT (post_id) DO NOTHING`
+	if _, err := outbox.Conn(ctx, r.db).Exec(ctx, q, postID, deletedAt); err != nil {
+		return fmt.Errorf("feed_repo.MarkPostDeleted: %w", err)
+	}
+	return nil
+}
+
+// IsPostDeleted indica si el post tiene tombstone en deleted_posts.
+func (r *FeedRepository) IsPostDeleted(ctx context.Context, postID uuid.UUID) (bool, error) {
+	const q = `SELECT EXISTS (SELECT 1 FROM deleted_posts WHERE post_id = $1)`
+	var deleted bool
+	if err := outbox.Conn(ctx, r.db).QueryRow(ctx, q, postID).Scan(&deleted); err != nil {
+		return false, fmt.Errorf("feed_repo.IsPostDeleted: %w", err)
+	}
+	return deleted, nil
 }
 
 // SaveAuthorPost registra el post en author_posts. ON CONFLICT lo hace idempotente

@@ -55,10 +55,11 @@ func main() {
 	// ── Adaptadores ──────────────────────────────────────────────────────────
 	feedRepo := postgres.NewFeedRepository(db)
 	followerRepo := postgres.NewFollowerRepository(db)
+	txManager := outbox.NewTxManager(db)
 
 	// ── Use cases ────────────────────────────────────────────────────────────
 	getFeedSvc := usecase.NewGetFeedService(feedRepo)
-	fanOutSvc := usecase.NewFanOutService(feedRepo, followerRepo)
+	fanOutSvc := usecase.NewFanOutService(txManager, feedRepo, followerRepo)
 
 	// ── NATS streams ─────────────────────────────────────────────────────────
 	if err := ensureStreams(js); err != nil {
@@ -67,7 +68,7 @@ func main() {
 	}
 
 	// ── NATS consumer ────────────────────────────────────────────────────────
-	consumer := natsconsumer.NewConsumer(js, outbox.NewTxManager(db), fanOutSvc, feedRepo, followerRepo)
+	consumer := natsconsumer.NewConsumer(js, txManager, fanOutSvc, feedRepo, followerRepo)
 	if err := consumer.Subscribe(); err != nil {
 		slog.Error("consumer subscribe error", "err", err)
 		os.Exit(1)

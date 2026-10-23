@@ -35,6 +35,8 @@ const backfillLimit = 20
 
 // feedWriter es la interfaz mínima que el consumer necesita sobre el feed.
 type feedWriter interface {
+	LockPost(ctx context.Context, postID uuid.UUID) error
+	MarkPostDeleted(ctx context.Context, postID uuid.UUID, deletedAt time.Time) error
 	DeleteByPostID(ctx context.Context, postID uuid.UUID) error
 	DeleteAuthorPost(ctx context.Context, postID uuid.UUID) error
 	DeleteByAuthorFromUser(ctx context.Context, userID, authorID uuid.UUID) error
@@ -120,14 +122,24 @@ func (c *Consumer) handlePostDeleted(ctx context.Context, msg *nats.Msg) error {
 		return dlq.Permanent(fmt.Errorf("unmarshal envelope: %w", err))
 	}
 
-	postID, err := extractPostID(envelope)
-	if err != nil {
+	var p events.PostDeletedPayload
+	if err := decodePayload(envelope, &p); err != nil {
 		return dlq.Permanent(fmt.Errorf("extract post deleted payload (event_id=%s): %w", envelope.EventID, err))
 	}
+	postID := p.PostID
 
 	slog.Info("consumer: invalidating feed for deleted post", "post_id", postID)
 
+	// Mismo lock que el fan-out: si el posts.created de este post se está
+	// procesando, esperamos su commit y borramos lo que insertó. El tombstone
+	// frena a un posts.created que llegue después.
 	return c.tx.WithinTx(ctx, func(ctx context.Context) error {
+		if err := c.feedRepo.LockPost(ctx, postID); err != nil {
+			return fmt.Errorf("lock post (post_id=%s): %w", postID, err)
+		}
+		if err := c.feedRepo.MarkPostDeleted(ctx, postID, p.DeletedAt); err != nil {
+			return fmt.Errorf("mark post deleted (post_id=%s): %w", postID, err)
+		}
 		if err := c.feedRepo.DeleteByPostID(ctx, postID); err != nil {
 			return fmt.Errorf("delete feed entries (post_id=%s): %w", postID, err)
 		}
@@ -240,12 +252,4 @@ func extractPostCreatedCommand(env events.Envelope) (input.FanOutCommand, error)
 		PublishedAt: p.CreatedAt,
 		Visibility:  p.Visibility,
 	}, nil
-}
-
-func extractPostID(env events.Envelope) (uuid.UUID, error) {
-	var p events.PostDeletedPayload
-	if err := decodePayload(env, &p); err != nil {
-		return uuid.Nil, err
-	}
-	return p.PostID, nil
 }

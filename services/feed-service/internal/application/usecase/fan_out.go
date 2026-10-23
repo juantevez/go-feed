@@ -7,6 +7,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/juantevez/my-ig/feed-service/internal/application/port/input"
+	"github.com/juantevez/my-ig/feed-service/internal/application/port/output"
 	"github.com/juantevez/my-ig/feed-service/internal/domain/feed"
 )
 
@@ -22,12 +23,13 @@ const visibilityPublic = "public"
 // FanOutService implementa input.FanOutUseCase.
 // Consume posts.created.v1 y propaga el post al feed del autor y de cada seguidor activo.
 type FanOutService struct {
+	tx        output.TxManager
 	feeds     feed.Repository
 	followers feed.FollowerRepository
 }
 
-func NewFanOutService(feeds feed.Repository, followers feed.FollowerRepository) *FanOutService {
-	return &FanOutService{feeds: feeds, followers: followers}
+func NewFanOutService(tx output.TxManager, feeds feed.Repository, followers feed.FollowerRepository) *FanOutService {
+	return &FanOutService{tx: tx, feeds: feeds, followers: followers}
 }
 
 // FanOut propaga el post al feed del autor y, si es público, a los de todos sus
@@ -38,7 +40,28 @@ func NewFanOutService(feeds feed.Repository, followers feed.FollowerRepository) 
 //
 // Idempotencia: BulkInsert usa ON CONFLICT DO NOTHING — si el worker
 // reprocesa el mismo evento, no genera duplicados.
+//
+// Corre en una tx con el post lockeado: si el posts.deleted del mismo post ya se
+// procesó (tombstone), no hace nada; si llega mientras tanto, espera al commit y
+// borra lo que se insertó. Así el orden de llegada de los dos eventos no importa.
 func (s *FanOutService) FanOut(ctx context.Context, cmd input.FanOutCommand) error {
+	return s.tx.WithinTx(ctx, func(ctx context.Context) error {
+		if err := s.feeds.LockPost(ctx, cmd.PostID); err != nil {
+			return fmt.Errorf("fan_out: lock post: %w", err)
+		}
+		deleted, err := s.feeds.IsPostDeleted(ctx, cmd.PostID)
+		if err != nil {
+			return fmt.Errorf("fan_out: check deleted: %w", err)
+		}
+		if deleted {
+			slog.Info("fan_out: post already deleted, skipping", "post_id", cmd.PostID, "author_id", cmd.AuthorID)
+			return nil
+		}
+		return s.fanOut(ctx, cmd)
+	})
+}
+
+func (s *FanOutService) fanOut(ctx context.Context, cmd input.FanOutCommand) error {
 	var followerIDs []uuid.UUID
 	if cmd.Visibility == visibilityPublic {
 		// Índice por autor: lo usa el backfill cuando alguien empieza a seguirlo,

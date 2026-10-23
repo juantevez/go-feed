@@ -10,6 +10,17 @@ import (
 // Repository es el puerto driven (secundario) para persistencia del feed.
 // El adaptador Postgres implementa esta interfaz.
 type Repository interface {
+	// LockPost serializa, hasta el fin de la tx, el procesamiento de posts.created
+	// y posts.deleted de un mismo post. Debe llamarse dentro de una tx.
+	LockPost(ctx context.Context, postID uuid.UUID) error
+
+	// MarkPostDeleted registra el tombstone del post (deleted_posts). Idempotente.
+	MarkPostDeleted(ctx context.Context, postID uuid.UUID, deletedAt time.Time) error
+
+	// IsPostDeleted indica si el post tiene tombstone: un posts.created que llega
+	// después de su posts.deleted no debe volver a meterlo en los feeds.
+	IsPostDeleted(ctx context.Context, postID uuid.UUID) (bool, error)
+
 	// SaveAuthorPost registra el post en el índice local de posts por autor
 	// (author_posts). Idempotente.
 	SaveAuthorPost(ctx context.Context, postID, authorID uuid.UUID, publishedAt time.Time) error

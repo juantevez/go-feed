@@ -40,7 +40,7 @@ flowchart LR
         K["Consumers JetStream"]
     end
 
-    PG[("postgres-feed<br/>feed_entries, followers, author_posts")]
+    PG[("postgres-feed<br/>feed_entries, followers,<br/>author_posts, deleted_posts")]
 
     CS -->|posts.created.v1, posts.deleted.v1| POSTS
     SS -->|users.followed.v1, users.unfollowed.v1| USERS
@@ -81,6 +81,7 @@ services/feed-service/
     ├── application/
     │   ├── port/input/  feed_usecase.go        # puerto driving: GetFeed
     │   │                fanout_usecase.go      # puerto driving: FanOut
+    │   ├── port/output/ tx_manager.go          # puerto driven: TxManager
     │   └── usecase/     get_feed.go  fan_out.go
     └── infrastructure/
         ├── http/        handler/ router/ middleware/   # adaptador HTTP (chi) + JWTMiddleware
@@ -199,13 +200,21 @@ sequenceDiagram
 
     CS->>JS: posts.created.v1 via outbox
     JS->>K: entrega, durable feed-service-post-created
-    alt visibility = public
-        K->>DB: INSERT author_posts ON CONFLICT DO NOTHING
-        K->>DB: SELECT seguidores con relacion activa, hasta 10000
+    K->>DB: BEGIN
+    K->>DB: advisory lock del post
+    K->>DB: SELECT tombstone en deleted_posts
+    alt post ya borrado
+        Note over K: posts.deleted llego antes, no se inserta nada
+    else post vivo
+        opt visibility = public
+            K->>DB: INSERT author_posts ON CONFLICT DO NOTHING
+            K->>DB: SELECT seguidores con relacion activa, hasta 10000
+        end
+        loop batches de 500 destinatarios, autor incluido
+            K->>DB: INSERT feed_entries ON CONFLICT DO NOTHING
+        end
     end
-    loop batches de 500 destinatarios, autor incluido
-        K->>DB: INSERT feed_entries ON CONFLICT DO NOTHING
-    end
+    K->>DB: COMMIT
     K-->>JS: Ack
 ```
 
@@ -215,7 +224,9 @@ sequenceDiagram
   a seguidores, ver [CONTENT.md](CONTENT.md#visibilidad)).
 - **Idempotente:** un reproceso del mismo evento no duplica nada (`ON CONFLICT DO NOTHING`), así
   que si falla a mitad de los batches, el reintento completa lo que faltaba.
-- El fan-out no va en una transacción: cada batch es un `pgx.Batch` (un round-trip).
+- **Todo el fan-out es una transacción** (cada batch es un `pgx.Batch`, un round-trip). O el
+  post llega a todos los feeds o a ninguno.
+- **Lock y tombstone:** ver [borrado](#borrado-de-un-post).
 
 ### Follow y unfollow
 
@@ -257,9 +268,25 @@ aparecen en el feed del nuevo seguidor.
 
 ### Borrado de un post
 
-`posts.deleted.v1` (durable `feed-service-post-deleted`) borra, en una transacción, todas las
-entradas de ese post en `feed_entries` y su fila en `author_posts`. Sin lo segundo, un follow
-posterior lo volvería a cargar vía backfill.
+`posts.deleted.v1` (durable `feed-service-post-deleted`), en una transacción:
+
+1. Toma el advisory lock del post.
+2. Registra el **tombstone** en `deleted_posts`.
+3. Borra todas las entradas del post en `feed_entries` y su fila en `author_posts`. Sin lo
+   segundo, un follow posterior lo volvería a cargar vía backfill.
+
+`posts.created` y `posts.deleted` llegan por suscripciones distintas, así que pueden procesarse
+en cualquier orden (por ejemplo, si el create falla y se reintenta con backoff). El tombstone y el
+lock hacen que el resultado no dependa del orden:
+
+| Orden | Qué pasa |
+|---|---|
+| create, después delete | El delete borra lo que insertó el create. |
+| delete, después create | El create encuentra el tombstone y no inserta nada. |
+| Los dos a la vez | El lock (`pg_advisory_xact_lock` sobre el `post_id`) los serializa; queda uno de los dos casos de arriba. |
+
+Sin esto, un delete procesado antes que su create dejaba el post en los feeds para siempre
+(una entrada que responde `404` en content-service).
 
 ### Lectura
 
@@ -290,6 +317,7 @@ sequenceDiagram
 | `feed_entries` | Timeline materializado. `UNIQUE (user_id, post_id)`. |
 | `followers` | Grafo local, last-write-wins. `UNIQUE (follower_id, following_id)`. |
 | `author_posts` | Índice local de posts **públicos** por autor, para el backfill. PK `post_id`. |
+| `deleted_posts` | Tombstone de posts borrados (`post_id`, `deleted_at`). Frena a un `posts.created` tardío. |
 
 Índices:
 
@@ -302,7 +330,7 @@ sequenceDiagram
 | `author_posts (author_id, score DESC)` | Últimos posts de un autor (backfill). |
 
 Los repositorios usan `outbox.Conn(ctx, pool)`: si hay una transacción en el `ctx` la usan, si
-no, el pool. La excepción es `BulkInsert`, que siempre va por el pool.
+no, el pool.
 
 Migraciones (golang-migrate, las corre el contenedor `migrate-feed` al levantar el stack):
 
@@ -311,6 +339,7 @@ Migraciones (golang-migrate, las corre el contenedor `migrate-feed` al levantar 
 | `0001` | `feed_entries`, `followers` e índices |
 | `0002` | `followers.active` y `followers.state_at` (last-write-wins) |
 | `0003` | `author_posts` + seed desde `feed_entries` |
+| `0004` | `deleted_posts` |
 
 ---
 
@@ -397,7 +426,10 @@ make dlq-replay-all CONSUMER=feed-service-post-created
   Las suscripciones no se drenan: un mensaje que se estaba procesando queda sin ack y JetStream
   lo reentrega cuando vence el `AckWait` (30 s). Como los handlers son idempotentes, no se
   pierde ni se duplica nada.
-- **Tests:** no hay.
+- **Tests:** [`fan_out_test.go`](../../services/feed-service/internal/application/usecase/fan_out_test.go)
+  cubre el fan-out con fakes de los puertos: post público (autor + seguidores), privado (solo
+  el autor) y post con tombstone (no inserta nada). No hay tests de los handlers del consumer,
+  de la paginación ni de los repositorios.
 
 ---
 
@@ -417,8 +449,10 @@ conectaron y restos de código para limpiar.
   quien renueva tokens con `/auth/refresh` nunca vuelve a loguearse) y fan-in al leer, para que
   quien vuelve después de un tiempo no encuentre huecos en su feed.
 - **`/ready`** responde `200` siempre; tiene un `TODO` para chequear DB y NATS.
-- **Retención del feed:** `feed_entries` crece sin límite; no se recortan entradas viejas.
-- **Tests:** no hay de ninguna capa.
+- **Retención:** `feed_entries` y `deleted_posts` crecen sin límite. Los tombstones se podrían
+  podar pasado el tiempo en que un `posts.created` todavía puede llegar (7 días de retención del
+  stream `POSTS` más 30 de la DLQ).
+- **Tests:** solo del caso de uso de fan-out (ver [Operación](#operación)).
 - **Restos para limpiar:** `ErrFeedEntryNotFound` no se usa y `ErrFeedEmpty` se chequea en el
   handler pero nadie lo retorna; `LOG_LEVEL` no se lee.
 
@@ -426,26 +460,20 @@ conectaron y restos de código para limpiar.
 
 ## Limitaciones conocidas
 
-Ordenadas por impacto. La primera está verificada contra el servicio corriendo.
+Ordenadas por impacto.
 
-1. **Un `posts.deleted` procesado antes que su `posts.created` deja un post fantasma.** Van por
-   suscripciones distintas y, a diferencia de los follows, no hay last-write-wins: si el create
-   se reintenta con backoff y el delete se procesa en el medio, el create posterior vuelve a
-   insertar el post en los feeds y en `author_posts`, y nada lo limpia. Verificado publicando
-   ambos eventos en ese orden. El cliente ve una entrada que responde `404` en content-service.
-
-2. **Más de 10 000 seguidores se truncan sin aviso.** `GetActiveFollowers` corta en
+1. **Más de 10 000 seguidores se truncan sin aviso.** `GetActiveFollowers` corta en
    10 000 ordenando por `follower_id`: los seguidores con UUID más alto nunca reciben los posts
    de ese autor. No hay fan-in que los cubra.
 
-3. **Un fan-out largo puede pasar el `AckWait`.** El fan-out completo corre dentro del handler
-   (hasta 20 batches de 500) y el contexto no tiene timeout. Si tarda más de 30 s, JetStream
-   reentrega el mensaje mientras el primero sigue: el trabajo se duplica (sin duplicar filas,
-   por `ON CONFLICT`).
+2. **Un fan-out largo puede pasar el `AckWait`.** El fan-out completo corre dentro del handler,
+   en una sola transacción (hasta 20 batches de 500), y el contexto no tiene timeout. Si tarda
+   más de 30 s, JetStream reentrega el mensaje mientras el primero sigue: la reentrega espera el
+   lock del post y después repite el trabajo (sin duplicar filas, por `ON CONFLICT`).
 
-4. **El cursor no aprovecha del todo el índice.** La página siguiente filtra con
+3. **El cursor no aprovecha del todo el índice.** La página siguiente filtra con
    `(score, post_id::text) < (...)`: el cast a texto impide usar el índice para el desempate por
    `post_id`. El orden es correcto (el texto de un UUID ordena igual que el UUID); el costo es
    de performance con feeds grandes.
 
-5. **CORS fijo a `http://localhost:5173`.** Igual que el resto de los servicios.
+4. **CORS fijo a `http://localhost:5173`.** Igual que el resto de los servicios.
