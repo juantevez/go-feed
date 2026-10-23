@@ -36,7 +36,7 @@ type Repository interface {
 // FollowerRepository es el puerto para consultar el grafo social.
 // El feed-service no gestiona follows — los consulta como read-only.
 type FollowerRepository interface {
-	// GetActiveFollowers retorna los IDs de seguidores activos de un autor.
-	// "Activos" = que han hecho login en los últimos 30 días (fan-out selectivo).
+	// GetActiveFollowers retorna los IDs de quienes siguen hoy al autor
+	// (relación activa, no los que dejaron de seguirlo).
 	GetActiveFollowers(ctx context.Context, authorID uuid.UUID) ([]uuid.UUID, error)
 }

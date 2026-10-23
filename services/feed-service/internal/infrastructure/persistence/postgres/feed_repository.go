@@ -157,8 +157,8 @@ func (r *FeedRepository) DeleteByAuthorFromUser(ctx context.Context, userID, aut
 
 // FollowerRepository implementa feed.FollowerRepository.
 // Usa la tx del context si existe (outbox.Conn), así participa de TxManager.WithinTx.
-// El feed-service lee el grafo social de su propia DB (replicado desde social-service).
-// En fase 1 la tabla followers es poblada directamente desde auth-service via evento.
+// El feed-service lee el grafo social de su propia DB, replicado desde social-service
+// vía users.followed.v1 / users.unfollowed.v1.
 type FollowerRepository struct {
 	db *pgxpool.Pool
 }
@@ -202,8 +202,14 @@ func (r *FollowerRepository) MarkUnfollowed(ctx context.Context, followerID, fol
 	return tag.RowsAffected() > 0, nil
 }
 
-// GetActiveFollowers retorna los IDs de seguidores activos de un autor.
-// "Activos" = usuarios que han hecho login en los últimos 30 días.
+// GetActiveFollowers retorna los IDs de quienes siguen hoy al autor (relación
+// activa, sin tombstone de unfollow).
+//
+// No filtra por actividad reciente: last_seen_at solo se setea al seguir, y
+// filtrar por él cortaba el fan-out a los 30 días del follow. Un fan-out selectivo
+// por actividad necesita además fan-in al leer, para que quien vuelve no encuentre
+// huecos en su feed.
+//
 // Limita a 10k — por encima de eso el fan-in es más eficiente (fase 2).
 func (r *FollowerRepository) GetActiveFollowers(ctx context.Context, authorID uuid.UUID) ([]uuid.UUID, error) {
 	const q = `
@@ -211,7 +217,6 @@ func (r *FollowerRepository) GetActiveFollowers(ctx context.Context, authorID uu
 		FROM followers
 		WHERE following_id = $1
 		  AND active
-		  AND last_seen_at > NOW() - INTERVAL '30 days'
 		ORDER BY follower_id
 		LIMIT 10000`
 
