@@ -3,25 +3,26 @@ FROM golang:1.25-alpine AS builder
 
 WORKDIR /app
 
-# shared debe estar disponible para el replace directive
+# Copiamos shared primero — el replace directive lo referencia como ../../shared
+# desde el punto de vista del módulo, pero en Docker necesitamos traerlo al contexto.
 COPY shared/ ./shared/
-COPY auth-service/ ./auth-service/
+COPY services/feed-service/ ./services/feed-service/
 
-WORKDIR /app/auth-service
+WORKDIR /app/services/feed-service
 
 RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked \
     go mod download
 RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked \
     --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-    go build -ldflags="-s -w" -o /auth-service ./cmd/server
+    go build -ldflags="-s -w" -o /feed-service ./cmd/server
 
 # ── Runtime stage ───────────────────────────────────────────────────────────────
 FROM gcr.io/distroless/static-debian12 AS runtime
 
 WORKDIR /app
-COPY --from=builder /auth-service /app/auth-service
+COPY --from=builder /feed-service /app/feed-service
 
-EXPOSE 8080
+EXPOSE 8081
 
-ENTRYPOINT ["/app/auth-service"]
+ENTRYPOINT ["/app/feed-service"]

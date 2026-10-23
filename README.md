@@ -104,38 +104,43 @@ Los mensajes fallidos van a `dlq.<tópico>` (dead letter queue).
 
 ```
 feed-backend/
-├── shared/                   # Paquetes compartidos (events, envelope)
-├── auth-service/
-│   ├── cmd/server/
-│   ├── internal/
-│   │   ├── domain/user/      # Agregado User + eventos
-│   │   ├── domain/token/     # Entidad Token + JWT service
-│   │   ├── application/      # Casos de uso + puertos
-│   │   └── infrastructure/   # Postgres, NATS, HTTP handler
-│   └── migrations/
-├── feed-service/
-│   ├── cmd/server/
-│   ├── internal/
-│   │   ├── domain/feed/      # FeedEntry + repository port
-│   │   └── infrastructure/   # Postgres, NATS consumer, HTTP handler
-│   └── migrations/
-├── content-service/
-│   ├── cmd/server/
-│   ├── internal/
-│   │   ├── domain/post/      # Agregado Post + eventos
-│   │   ├── domain/media/     # Entidad Media
-│   │   └── infrastructure/   # Postgres, NATS, S3/MinIO, HTTP handler
-│   └── migrations/
-├── social-service/
-│   ├── cmd/server/
-│   ├── internal/
-│   │   ├── domain/follow/    # Agregado Follow + eventos
-│   │   └── infrastructure/   # Postgres, NATS, HTTP handler
-│   └── migrations/
-├── api/openapi/specs.yaml    # Especificación OpenAPI
-├── docker-compose.yml
+├── api/
+│   ├── openapi/specs.yaml        # Especificación OpenAPI
+│   └── postman/                  # Colección de Postman
+├── docs/                         # Documentación técnica por servicio
+├── services/                     # Un bounded context por servicio (módulo Go propio)
+│   ├── auth-service/
+│   │   ├── cmd/server/
+│   │   ├── internal/
+│   │   │   ├── domain/user/      # Agregado User + eventos
+│   │   │   ├── domain/token/     # Entidad Token + JWT service
+│   │   │   ├── application/      # Casos de uso + puertos
+│   │   │   └── infrastructure/   # Postgres, HTTP handler
+│   │   └── Dockerfile
+│   ├── content-service/          # Posts y media (S3/MinIO)
+│   ├── feed-service/             # Fan-out, feed, réplica del grafo social
+│   ├── notification-service/     # Notificaciones + WebSocket
+│   └── social-service/           # Follow / Unfollow
+├── shared/
+│   ├── events/                   # Envelope + payloads + tópicos
+│   ├── outbox/                   # Transactional outbox (TxManager, Publisher, Relay)
+│   ├── dlq/                      # Dead letter queue para consumers JetStream
+│   └── cmd/dlq/                  # CLI para inspeccionar/reprocesar la DLQ
+├── deploy/
+│   ├── docker/
+│   │   └── docker-compose.yml    # Stack local completo (project name: feed-backend)
+│   └── migrations/<servicio>/    # SQL de golang-migrate, una carpeta por servicio
+├── .env.example                  # Copiar a .env (make lo hace solo); define COMPOSE_FILE
+├── go.work                       # Workspace: gopls y go build/test desde la raíz
 └── Makefile
 ```
+
+`docker compose ...` funciona directo desde la raíz: el `.env` define
+`COMPOSE_FILE=deploy/docker/docker-compose.yml`.
+
+Cada servicio es un módulo Go independiente (`github.com/juantevez/my-ig/<servicio>`) que
+referencia `shared` con un `replace => ../../shared`. Los Dockerfiles se buildean con la raíz
+del repo como contexto.
 
 ## Regla hexagonal
 
@@ -167,7 +172,7 @@ HTTP handler → input port (UseCase)
 make build        # Compilar todos los módulos
 make test         # Tests en todos los módulos (con -race)
 make tidy         # go mod tidy en todos los módulos
-make health       # curl /health en los 4 servicios
+make health       # curl /health en los servicios
 make nats-info    # Estado de NATS JetStream
 make down         # Bajar todo y borrar volúmenes
 ```

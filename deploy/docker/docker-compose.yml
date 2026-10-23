@@ -1,3 +1,7 @@
+# Nombre fijo: si no, Compose usa el nombre del directorio ("docker") y crearía
+# volúmenes nuevos y vacíos en vez de los existentes feed-backend_*.
+name: feed-backend
+
 services:
 
   # ── PostgreSQL auth ───────────────────────────────────────────────────────────
@@ -137,7 +141,7 @@ services:
       postgres-auth:
         condition: service_healthy
     volumes:
-      - ./auth-service/migrations:/migrations
+      - ../migrations/auth-service:/migrations
     command:
       - "-path=/migrations"
       - "-database=postgres://${AUTH_DB_USER:-ig_user}:${AUTH_DB_PASS:-ig_pass}@postgres-auth:5432/${AUTH_DB_NAME:-ig_auth}?sslmode=disable"
@@ -152,7 +156,7 @@ services:
       postgres-feed:
         condition: service_healthy
     volumes:
-      - ./feed-service/migrations:/migrations
+      - ../migrations/feed-service:/migrations
     command:
       - "-path=/migrations"
       - "-database=postgres://${FEED_DB_USER:-ig_user}:${FEED_DB_PASS:-ig_pass}@postgres-feed:5432/${FEED_DB_NAME:-ig_feed}?sslmode=disable"
@@ -167,7 +171,7 @@ services:
       postgres-content:
         condition: service_healthy
     volumes:
-      - ./content-service/migrations:/migrations
+      - ../migrations/content-service:/migrations
     command:
       - "-path=/migrations"
       - "-database=postgres://${CONTENT_DB_USER:-ig_user}:${CONTENT_DB_PASS:-ig_pass}@postgres-content:5432/${CONTENT_DB_NAME:-ig_content}?sslmode=disable"
@@ -182,7 +186,7 @@ services:
       postgres-social:
         condition: service_healthy
     volumes:
-      - ./social-service/migrations:/migrations
+      - ../migrations/social-service:/migrations
     command:
       - "-path=/migrations"
       - "-database=postgres://${SOCIAL_DB_USER:-ig_user}:${SOCIAL_DB_PASS:-ig_pass}@postgres-social:5432/${SOCIAL_DB_NAME:-ig_social}?sslmode=disable"
@@ -192,8 +196,8 @@ services:
   # ── Auth Service ──────────────────────────────────────────────────────────────
   auth-service:
     build:
-      context: .
-      dockerfile: auth-service/Dockerfile
+      context: ../..   # raíz del monorepo: los Dockerfiles copian shared/ y services/<svc>/
+      dockerfile: services/auth-service/Dockerfile
     container_name: my-ig-auth
     restart: unless-stopped
     depends_on:
@@ -217,8 +221,8 @@ services:
   # ── Feed Service ──────────────────────────────────────────────────────────────
   feed-service:
     build:
-      context: .
-      dockerfile: feed-service/Dockerfile
+      context: ../..   # raíz del monorepo: los Dockerfiles copian shared/ y services/<svc>/
+      dockerfile: services/feed-service/Dockerfile
     container_name: my-ig-feed
     restart: unless-stopped
     depends_on:
@@ -239,8 +243,8 @@ services:
   # ── Content Service ───────────────────────────────────────────────────────────
   content-service:
     build:
-      context: .
-      dockerfile: content-service/Dockerfile
+      context: ../..   # raíz del monorepo: los Dockerfiles copian shared/ y services/<svc>/
+      dockerfile: services/content-service/Dockerfile
     container_name: my-ig-content
     restart: unless-stopped
     depends_on:
@@ -272,8 +276,8 @@ services:
   # ── Social Service ────────────────────────────────────────────────────────────
   social-service:
     build:
-      context: .
-      dockerfile: social-service/Dockerfile
+      context: ../..   # raíz del monorepo: los Dockerfiles copian shared/ y services/<svc>/
+      dockerfile: services/social-service/Dockerfile
     container_name: my-ig-social
     restart: unless-stopped
     depends_on:
@@ -320,7 +324,7 @@ services:
       postgres-notification:
         condition: service_healthy
     volumes:
-      - ./notification-service/migrations:/migrations
+      - ../migrations/notification-service:/migrations
     command:
       - "-path=/migrations"
       - "-database=postgres://${NOTIF_DB_USER:-ig_user}:${NOTIF_DB_PASS:-ig_pass}@postgres-notification:5432/${NOTIF_DB_NAME:-ig_notification}?sslmode=disable"
@@ -330,8 +334,8 @@ services:
   # ── Notification Service ──────────────────────────────────────────────────────
   notification-service:
     build:
-      context: .
-      dockerfile: notification-service/Dockerfile
+      context: ../..   # raíz del monorepo: los Dockerfiles copian shared/ y services/<svc>/
+      dockerfile: services/notification-service/Dockerfile
     container_name: my-ig-notification
     restart: unless-stopped
     depends_on:

@@ -2,7 +2,7 @@ module github.com/juantevez/my-ig/feed-service
 
 go 1.25.0
 
-replace github.com/juantevez/my-ig/shared => ../shared
+replace github.com/juantevez/my-ig/shared => ../../shared
 
 require (
 	github.com/go-chi/chi/v5 v5.3.0

@@ -1,0 +1,10 @@
+go 1.25.0
+
+use (
+	./services/auth-service
+	./services/content-service
+	./services/feed-service
+	./services/notification-service
+	./services/social-service
+	./shared
+)

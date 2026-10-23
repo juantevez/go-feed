@@ -2,7 +2,7 @@ module github.com/juantevez/my-ig/content-service
 
 go 1.25.0
 
-replace github.com/juantevez/my-ig/shared => ../shared
+replace github.com/juantevez/my-ig/shared => ../../shared
 
 require (
 	github.com/aws/aws-sdk-go-v2 v1.41.7

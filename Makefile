@@ -1,58 +1,50 @@
-.PHONY: up down ps logs build test tidy health nats-streams nats-streams-ls dlq-list dlq-show dlq-replay dlq-replay-all dlq-discard
+.PHONY: up down ps build test tidy health nats-streams nats-streams-ls dlq-list dlq-show dlq-replay dlq-replay-all dlq-discard
 
 NATS_SERVER := nats://localhost:4222
 
+# Monorepo: servicios en services/, compose en deploy/docker/. El .env de la raíz
+# define COMPOSE_FILE, así `docker compose` funciona desde acá sin -f (no usar -f:
+# con -f Compose busca el .env junto al compose y no el de la raíz).
+COMPOSE  := docker compose
+SERVICES := auth-service content-service feed-service notification-service social-service
+MODULES  := shared $(addprefix services/,$(SERVICES))
+# go.work: desde la raíz hay que nombrar cada módulo (./... no cruza módulos).
+PKGS     := $(addsuffix /...,$(addprefix ./,$(MODULES)))
+
 # ── Docker ────────────────────────────────────────────────────────────────────
-up:
-	@cp -n .env.example .env 2>/dev/null || true
-	docker compose up --build -d
+.env:
+	cp .env.example .env
+
+up: .env
+	$(COMPOSE) up --build -d
 	@echo "── esperando servicios (15s) ──"
 	@sleep 15
 	$(MAKE) nats-streams
 	@echo "── listo! ──"
 	$(MAKE) health
 
-down:
-	docker compose down -v
+down: .env
+	$(COMPOSE) down -v
 
-ps:
-	docker compose ps
+ps: .env
+	$(COMPOSE) ps
 
-logs-auth:
-	docker compose logs -f auth-service
-
-logs-feed:
-	docker compose logs -f feed-service
-
-logs-content:
-	docker compose logs -f content-service
-
-logs-social:
-	docker compose logs -f social-service
+logs-%: .env            # make logs-auth | logs-feed | logs-content | logs-social | logs-notification
+	$(COMPOSE) logs -f $*-service
 
 # ── Build ─────────────────────────────────────────────────────────────────────
 build:
-	cd shared          && go build ./...
-	cd auth-service    && go build ./...
-	cd feed-service    && go build ./...
-	cd content-service && go build ./...
-	cd social-service  && go build ./...
+	go build $(PKGS)
 
 # ── Test ──────────────────────────────────────────────────────────────────────
 test:
-	cd shared          && go test ./... -race -count=1
-	cd auth-service    && go test ./... -race -count=1
-	cd feed-service    && go test ./... -race -count=1
-	cd content-service && go test ./... -race -count=1
-	cd social-service  && go test ./... -race -count=1
+	go test $(PKGS) -race -count=1
 
 # ── Tidy ──────────────────────────────────────────────────────────────────────
+# go mod tidy es por módulo (no usa go.work), y después sincronizamos el workspace.
 tidy:
-	cd shared          && go mod tidy
-	cd auth-service    && go mod tidy
-	cd feed-service    && go mod tidy
-	cd content-service && go mod tidy
-	cd social-service  && go mod tidy
+	@for m in $(MODULES); do echo "── $$m"; (cd $$m && go mod tidy) || exit 1; done
+	go work sync
 
 # ── Health checks ─────────────────────────────────────────────────────────────
 health:
@@ -105,7 +97,4 @@ dlq-discard:       # make dlq-discard SEQ=12
 # ── NATS monitoring ───────────────────────────────────────────────────────────
 nats-info:
 	curl -s http://localhost:8222/varz | jq .
-
-logs-notification:
-	docker compose logs -f notification-service
 	

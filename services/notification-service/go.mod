@@ -1,14 +1,14 @@
-module github.com/juantevez/my-ig/social-service
+module github.com/juantevez/my-ig/notification-service
 
 go 1.25.0
 
-replace github.com/juantevez/my-ig/shared => ../shared
+replace github.com/juantevez/my-ig/shared => ../../shared
 
 require (
 	github.com/go-chi/chi/v5 v5.3.0
-	github.com/go-chi/cors v1.2.2
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/uuid v1.6.0
+	github.com/gorilla/websocket v1.5.3
 	github.com/jackc/pgx/v5 v5.9.2
 	github.com/juantevez/my-ig/shared v0.0.0-00010101000000-000000000000
 	github.com/nats-io/nats.go v1.52.0

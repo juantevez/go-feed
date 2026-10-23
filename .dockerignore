@@ -24,9 +24,12 @@ bin/
 # Test data
 testdata/
 
-# Docker (pero incluir Dockerfiles necesarios)
-!cmd/*/Dockerfile
-!docker-compose.yml
+# Monorepo: los Dockerfiles solo copian shared/ y services/<svc>/
+docs/
+api/
+deploy/
+go.work
+go.work.sum
 
 # Node / Python / Otros (si no los usas, puedes quitar)
 node_modules/
