@@ -5,8 +5,11 @@ COPY shared/ ./shared/
 COPY notification-service/ ./notification-service/
 
 WORKDIR /app/notification-service
-RUN go mod download
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked \
+    go mod download
+RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
     go build -ldflags="-s -w" -o /notification-service ./cmd/server
 
 FROM gcr.io/distroless/static-debian12 AS runtime

@@ -95,7 +95,7 @@ services:
 
   # ── MinIO (S3 local) ──────────────────────────────────────────────────────────
   minio:
-    image: minio/minio:latest
+    image: pgsty/minio:latest  # minio/minio ya no se publica en Docker Hub
     container_name: my-ig-minio
     restart: unless-stopped
     command: server /data --console-address ":9001"
@@ -115,7 +115,7 @@ services:
 
   # ── MinIO bucket setup ────────────────────────────────────────────────────────
   minio-setup:
-    image: minio/mc:latest
+    image: pgsty/mc:latest
     container_name: my-ig-minio-setup
     depends_on:
       minio:
@@ -213,11 +213,6 @@ services:
       LOG_LEVEL: "info"
     ports:
       - "8080:8080"
-    healthcheck:
-      test: ["CMD-SHELL", "true"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
 
   # ── Feed Service ──────────────────────────────────────────────────────────────
   feed-service:
@@ -240,11 +235,6 @@ services:
       LOG_LEVEL: "info"
     ports:
       - "8081:8081"
-    healthcheck:
-      test: ["CMD-SHELL", "true"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
 
   # ── Content Service ───────────────────────────────────────────────────────────
   content-service:
@@ -271,18 +261,13 @@ services:
       S3_BUCKET: "my-ig-media"
       S3_REGION: "us-east-1"
       S3_ENDPOINT: "http://minio:9000"
-      S3_BASE_URL: "http://localhost:9000/my-ig-media"
+      S3_BASE_URL: "/my-ig-media"  # relativo: el front lo sirve vía proxy
       S3_ACCESS_KEY: ${S3_ACCESS_KEY:-minioadmin}
       S3_SECRET_KEY: ${S3_SECRET_KEY:-minioadmin}
       JWT_SECRET: ${JWT_SECRET:-changeme_in_production}
       LOG_LEVEL: "info"
     ports:
       - "8082:8082"
-    healthcheck:
-      test: ["CMD-SHELL", "true"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
 
   # ── Social Service ────────────────────────────────────────────────────────────
   social-service:
@@ -306,11 +291,6 @@ services:
       LOG_LEVEL: "info"
     ports:
       - "8083:8083"
-    healthcheck:
-      test: ["CMD-SHELL", "true"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
 
 
   # ── PostgreSQL notification ───────────────────────────────────────────────────
@@ -369,11 +349,6 @@ services:
       LOG_LEVEL: "info"
     ports:
       - "8084:8084"
-    healthcheck:
-      test: ["CMD-SHELL", "true"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
 
 
 volumes:
