@@ -10,6 +10,10 @@
 // El consumer JetStream se configura con MaxDeliver ilimitado: si la
 // publicación a la DLQ falla, el mensaje se sigue reentregando en vez de
 // descartarse en silencio.
+//
+// Mientras el handler corre, se le avisa a JetStream cada 10 s que el mensaje
+// sigue en proceso (InProgress): un handler lento no recibe reentregas del mismo
+// mensaje por vencer el AckWait de 30 s.
 package dlq
 
 import (
@@ -39,6 +43,13 @@ const (
 	HeaderFailedAt        = "Dlq-Failed-At"
 
 	retention = 30 * 24 * time.Hour
+
+	// ackWait es cuánto espera JetStream un ack antes de reentregar.
+	ackWait = 30 * time.Second
+	// progressEvery es cada cuánto se avisa que un mensaje sigue en proceso
+	// (InProgress reinicia el ackWait). Bien por debajo de ackWait para que un
+	// aviso demorado no alcance a disparar una reentrega.
+	progressEvery = ackWait / 3
 )
 
 // backoff entre reintentos, indexado por número de entrega (1-based).
@@ -93,7 +104,7 @@ func Subscribe(js nats.JetStreamContext, subject, durable string, h Handler) err
 		nats.Durable(durable),
 		nats.AckExplicit(),
 		nats.MaxDeliver(-1), // los reintentos los cuenta wrap; ver doc del paquete
-		nats.AckWait(30*time.Second),
+		nats.AckWait(ackWait),
 		nats.DeliverNew(),
 	)
 	if err != nil {
@@ -104,7 +115,9 @@ func Subscribe(js nats.JetStreamContext, subject, durable string, h Handler) err
 
 func wrap(js nats.JetStreamContext, subject, durable string, h Handler) nats.MsgHandler {
 	return func(msg *nats.Msg) {
+		stop := keepInProgress(msg)
 		err := h(context.Background(), msg)
+		stop()
 		if err == nil {
 			_ = msg.Ack()
 			return
@@ -139,6 +152,29 @@ func wrap(js nats.JetStreamContext, subject, durable string, h Handler) nats.Msg
 			"deliveries", deliveries, "permanent", isPermanent(err), "err", err)
 		_ = msg.Term()
 	}
+}
+
+// keepInProgress le avisa a JetStream cada progressEvery que msg sigue en
+// proceso, hasta que se llame a la función que retorna. Sin esto, un handler que
+// tarda más que ackWait (ej. un fan-out grande) recibe una reentrega del mismo
+// mensaje mientras todavía lo está procesando.
+func keepInProgress(msg *nats.Msg) (stop func()) {
+	done := make(chan struct{})
+	go func() {
+		t := time.NewTicker(progressEvery)
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-t.C:
+				if err := msg.InProgress(); err != nil {
+					slog.Warn("consumer: in-progress ack failed", "subject", msg.Subject, "err", err)
+				}
+			}
+		}
+	}()
+	return func() { close(done) }
 }
 
 func publish(js nats.JetStreamContext, msg *nats.Msg, durable string, cause error, deliveries, streamSeq uint64) error {
