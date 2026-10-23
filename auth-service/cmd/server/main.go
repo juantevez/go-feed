@@ -130,7 +130,7 @@ func connectNATS(cfg configs.NATSConfig) (nats.JetStreamContext, *nats.Conn, err
 	nc, err := nats.Connect(cfg.URL,
 		nats.Timeout(cfg.ConnectTimeout),
 		nats.RetryOnFailedConnect(true),
-		nats.MaxReconnects(5),
+		nats.MaxReconnects(-1), // reconectar siempre: con 5 intentos, un corte corto de NATS dejaba el servicio desconectado para siempre
 	)
 	if err != nil {
 		return nil, nil, fmt.Errorf("nats connect: %w", err)
