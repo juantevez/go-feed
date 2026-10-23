@@ -18,12 +18,12 @@ import (
 	"github.com/nats-io/nats.go"
 
 	"github.com/juantevez/my-ig/content-service/configs"
-	"github.com/juantevez/my-ig/shared/outbox"
 	"github.com/juantevez/my-ig/content-service/internal/application/usecase"
 	"github.com/juantevez/my-ig/content-service/internal/infrastructure/http/handler"
 	"github.com/juantevez/my-ig/content-service/internal/infrastructure/http/router"
 	"github.com/juantevez/my-ig/content-service/internal/infrastructure/persistence/postgres"
 	s3store "github.com/juantevez/my-ig/content-service/internal/infrastructure/storage/s3"
+	"github.com/juantevez/my-ig/shared/outbox"
 )
 
 func main() {

@@ -8,8 +8,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/juantevez/my-ig/shared/outbox"
 	"github.com/juantevez/my-ig/auth-service/internal/domain/user"
+	"github.com/juantevez/my-ig/shared/outbox"
 )
 
 // UserRepository is the Postgres adapter for user.Repository.

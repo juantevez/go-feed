@@ -8,8 +8,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/juantevez/my-ig/shared/outbox"
 	domaintoken "github.com/juantevez/my-ig/auth-service/internal/domain/token"
+	"github.com/juantevez/my-ig/shared/outbox"
 )
 
 // RefreshTokenRepository persists refresh tokens for rotation and revocation.

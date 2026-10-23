@@ -14,12 +14,12 @@ import (
 	"github.com/nats-io/nats.go"
 
 	"github.com/juantevez/my-ig/auth-service/configs"
-	"github.com/juantevez/my-ig/shared/outbox"
 	"github.com/juantevez/my-ig/auth-service/internal/application/usecase"
 	"github.com/juantevez/my-ig/auth-service/internal/infrastructure/http/handler"
 	"github.com/juantevez/my-ig/auth-service/internal/infrastructure/http/router"
 	jwtadapter "github.com/juantevez/my-ig/auth-service/internal/infrastructure/jwt"
 	"github.com/juantevez/my-ig/auth-service/internal/infrastructure/persistence/postgres"
+	"github.com/juantevez/my-ig/shared/outbox"
 )
 
 func main() {
