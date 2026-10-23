@@ -21,7 +21,7 @@ type Consumer struct {
 	js           nats.JetStreamContext
 	tx           txRunner
 	fanOut       input.FanOutUseCase
-	feedRepo     feedDeleter
+	feedRepo     feedWriter
 	followerRepo followerWriter
 }
 
@@ -30,10 +30,15 @@ type txRunner interface {
 	WithinTx(ctx context.Context, fn func(ctx context.Context) error) error
 }
 
-// feedDeleter es la interfaz mínima que el consumer necesita para invalidación.
-type feedDeleter interface {
+// backfillLimit es cuántos posts recientes del autor se cargan al seguirlo.
+const backfillLimit = 20
+
+// feedWriter es la interfaz mínima que el consumer necesita sobre el feed.
+type feedWriter interface {
 	DeleteByPostID(ctx context.Context, postID uuid.UUID) error
+	DeleteAuthorPost(ctx context.Context, postID uuid.UUID) error
 	DeleteByAuthorFromUser(ctx context.Context, userID, authorID uuid.UUID) error
+	BackfillFromAuthor(ctx context.Context, userID, authorID uuid.UUID, limit int) (int64, error)
 }
 
 // followerWriter sincroniza el grafo social en la DB local del feed-service.
@@ -45,7 +50,7 @@ type followerWriter interface {
 	MarkUnfollowed(ctx context.Context, followerID, followingID uuid.UUID, at time.Time) (bool, error)
 }
 
-func NewConsumer(js nats.JetStreamContext, tx txRunner, fanOut input.FanOutUseCase, feedRepo feedDeleter, followerRepo followerWriter) *Consumer {
+func NewConsumer(js nats.JetStreamContext, tx txRunner, fanOut input.FanOutUseCase, feedRepo feedWriter, followerRepo followerWriter) *Consumer {
 	return &Consumer{js: js, tx: tx, fanOut: fanOut, feedRepo: feedRepo, followerRepo: followerRepo}
 }
 
@@ -122,10 +127,16 @@ func (c *Consumer) handlePostDeleted(ctx context.Context, msg *nats.Msg) error {
 
 	slog.Info("consumer: invalidating feed for deleted post", "post_id", postID)
 
-	if err := c.feedRepo.DeleteByPostID(ctx, postID); err != nil {
-		return fmt.Errorf("delete feed entries (post_id=%s): %w", postID, err)
-	}
-	return nil
+	return c.tx.WithinTx(ctx, func(ctx context.Context) error {
+		if err := c.feedRepo.DeleteByPostID(ctx, postID); err != nil {
+			return fmt.Errorf("delete feed entries (post_id=%s): %w", postID, err)
+		}
+		// Sin esto, un follow posterior lo volvería a cargar vía backfill.
+		if err := c.feedRepo.DeleteAuthorPost(ctx, postID); err != nil {
+			return fmt.Errorf("delete author post (post_id=%s): %w", postID, err)
+		}
+		return nil
+	})
 }
 
 // ── users.followed.v1 ─────────────────────────────────────────────────────────
@@ -143,15 +154,29 @@ func (c *Consumer) handleUserFollowed(ctx context.Context, msg *nats.Msg) error 
 
 	slog.Info("consumer: saving follower", "follower_id", p.FollowerID, "following_id", p.FollowingID)
 
-	applied, err := c.followerRepo.SaveFollower(ctx, p.FollowerID, p.FollowingID, p.FollowedAt)
-	if err != nil {
-		return fmt.Errorf("save follower: %w", err)
-	}
-	if !applied {
-		slog.Info("consumer: stale follow event ignored", "event_id", envelope.EventID,
-			"follower_id", p.FollowerID, "following_id", p.FollowingID)
-	}
-	return nil
+	// Follow + backfill en la misma tx, por la misma razón que en unfollow:
+	// si el backfill fallara, el reintento vería el follow como stale y lo saltearía.
+	return c.tx.WithinTx(ctx, func(ctx context.Context) error {
+		applied, err := c.followerRepo.SaveFollower(ctx, p.FollowerID, p.FollowingID, p.FollowedAt)
+		if err != nil {
+			return fmt.Errorf("save follower: %w", err)
+		}
+		if !applied {
+			// Hay un unfollow más nuevo: no cargar sus posts.
+			slog.Info("consumer: stale follow event ignored", "event_id", envelope.EventID,
+				"follower_id", p.FollowerID, "following_id", p.FollowingID)
+			return nil
+		}
+
+		// Cargar los posts recientes del autor en el feed del nuevo seguidor.
+		n, err := c.feedRepo.BackfillFromAuthor(ctx, p.FollowerID, p.FollowingID, backfillLimit)
+		if err != nil {
+			return fmt.Errorf("backfill feed: %w", err)
+		}
+		slog.Info("consumer: feed backfilled", "follower_id", p.FollowerID,
+			"following_id", p.FollowingID, "entries", n)
+		return nil
+	})
 }
 
 // ── users.unfollowed.v1 ───────────────────────────────────────────────────────

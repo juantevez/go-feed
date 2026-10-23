@@ -102,6 +102,47 @@ func (r *FeedRepository) DeleteByPostID(ctx context.Context, postID uuid.UUID) e
 	return nil
 }
 
+// SaveAuthorPost registra el post en author_posts. ON CONFLICT lo hace idempotente
+// ante reentregas de posts.created.
+func (r *FeedRepository) SaveAuthorPost(ctx context.Context, postID, authorID uuid.UUID, publishedAt time.Time) error {
+	const q = `
+		INSERT INTO author_posts (post_id, author_id, score)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (post_id) DO NOTHING`
+	score := float64(publishedAt.UTC().UnixMilli()) // mismo cálculo que feed.New
+	if _, err := outbox.Conn(ctx, r.db).Exec(ctx, q, postID, authorID, score); err != nil {
+		return fmt.Errorf("feed_repo.SaveAuthorPost: %w", err)
+	}
+	return nil
+}
+
+// DeleteAuthorPost saca el post del índice author_posts. Llamado en posts.deleted.
+func (r *FeedRepository) DeleteAuthorPost(ctx context.Context, postID uuid.UUID) error {
+	const q = `DELETE FROM author_posts WHERE post_id = $1`
+	if _, err := outbox.Conn(ctx, r.db).Exec(ctx, q, postID); err != nil {
+		return fmt.Errorf("feed_repo.DeleteAuthorPost: %w", err)
+	}
+	return nil
+}
+
+// BackfillFromAuthor copia al feed de userID los `limit` posts más recientes
+// de authorID. Llamado al empezar a seguir a alguien. Retorna cuántos insertó.
+func (r *FeedRepository) BackfillFromAuthor(ctx context.Context, userID, authorID uuid.UUID, limit int) (int64, error) {
+	const q = `
+		INSERT INTO feed_entries (user_id, post_id, author_id, score)
+		SELECT $1, post_id, author_id, score
+		FROM author_posts
+		WHERE author_id = $2
+		ORDER BY score DESC
+		LIMIT $3
+		ON CONFLICT (user_id, post_id) DO NOTHING`
+	tag, err := outbox.Conn(ctx, r.db).Exec(ctx, q, userID, authorID, limit)
+	if err != nil {
+		return 0, fmt.Errorf("feed_repo.BackfillFromAuthor: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
 // DeleteByAuthorFromUser elimina del feed de un usuario los posts de un autor.
 // Llamado en unfollow.
 func (r *FeedRepository) DeleteByAuthorFromUser(ctx context.Context, userID, authorID uuid.UUID) error {

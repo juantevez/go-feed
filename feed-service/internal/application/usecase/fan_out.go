@@ -33,6 +33,11 @@ func NewFanOutService(feeds feed.Repository, followers feed.FollowerRepository) 
 // Idempotencia: BulkInsert usa ON CONFLICT DO NOTHING — si el worker
 // reprocesa el mismo evento, no genera duplicados.
 func (s *FanOutService) FanOut(ctx context.Context, cmd input.FanOutCommand) error {
+	// Índice por autor: lo usa el backfill cuando alguien empieza a seguirlo.
+	if err := s.feeds.SaveAuthorPost(ctx, cmd.PostID, cmd.AuthorID, cmd.PublishedAt); err != nil {
+		return fmt.Errorf("fan_out: save author post: %w", err)
+	}
+
 	followerIDs, err := s.followers.GetActiveFollowers(ctx, cmd.AuthorID)
 	if err != nil {
 		return fmt.Errorf("fan_out: get followers: %w", err)

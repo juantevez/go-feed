@@ -2,6 +2,7 @@ package feed
 
 import (
 	"context"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -9,6 +10,10 @@ import (
 // Repository es el puerto driven (secundario) para persistencia del feed.
 // El adaptador Postgres implementa esta interfaz.
 type Repository interface {
+	// SaveAuthorPost registra el post en el índice local de posts por autor
+	// (author_posts). Idempotente.
+	SaveAuthorPost(ctx context.Context, postID, authorID uuid.UUID, publishedAt time.Time) error
+
 	// BulkInsert inserta múltiples FeedEntry en una sola operación.
 	// Usado por el fan-out worker al propagar un nuevo post.
 	// Ignora duplicados (ON CONFLICT DO NOTHING) para idempotencia.
