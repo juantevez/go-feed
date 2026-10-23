@@ -10,37 +10,41 @@ import (
 	"github.com/juantevez/my-ig/shared/events"
 )
 
-// DeletePost hace soft-delete del post, elimina el media de S3
-// y publica posts.deleted.v1 al bus.
+// DeletePost hace soft-delete del post y encola posts.deleted.v1 en la misma tx
+// (outbox). Después del commit elimina el media de S3.
 func (s *PostService) DeletePost(ctx context.Context, cmd input.DeletePostCommand) error {
-	p, err := s.posts.FindByID(ctx, cmd.PostID)
-	if err != nil {
-		return fmt.Errorf("delete_post: find: %w", err)
-	}
-
-	// La lógica de autorización vive en el agregado.
-	if err := p.Delete(cmd.AuthorID); err != nil {
-		return fmt.Errorf("delete_post: %w", err)
-	}
-
-	// Persistir estado deleted.
-	if err := s.posts.Update(ctx, p); err != nil {
-		return fmt.Errorf("delete_post: update: %w", err)
-	}
-
-	// Eliminar media de S3 en background — no bloquea la respuesta.
-	go func() {
-		for _, url := range p.MediaURLs {
-			if err := s.store.Delete(context.Background(), url); err != nil {
-				// Log y continuar — el archivo puede limpiarse luego con un job.
-				_ = err
-			}
-		}
-	}()
-
-	// Evento al bus — fire-and-forget.
 	traceID := chimiddleware.GetReqID(ctx)
-	s.publishAsync(events.TopicPostDeleted, post.NewDeletedEnvelope(p, cmd.Reason, traceID))
+
+	var p *post.Post
+	err := s.tx.WithinTx(ctx, func(ctx context.Context) error {
+		var err error
+		p, err = s.posts.FindByID(ctx, cmd.PostID)
+		if err != nil {
+			return fmt.Errorf("delete_post: find: %w", err)
+		}
+
+		// La lógica de autorización vive en el agregado.
+		if err := p.Delete(cmd.AuthorID); err != nil {
+			return fmt.Errorf("delete_post: %w", err)
+		}
+
+		// Persistir estado deleted.
+		if err := s.posts.Update(ctx, p); err != nil {
+			return fmt.Errorf("delete_post: update: %w", err)
+		}
+
+		envelope := post.NewDeletedEnvelope(p, cmd.Reason, traceID)
+		if err := s.publisher.Publish(ctx, events.TopicPostDeleted, envelope); err != nil {
+			return fmt.Errorf("delete_post: enqueue event: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+
+	// Solo después del commit: si la tx falla, el post sigue vivo y necesita sus archivos.
+	s.deleteMediaAsync(p.MediaURLs)
 
 	return nil
 }

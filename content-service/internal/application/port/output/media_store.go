@@ -11,7 +11,7 @@ type MediaStore interface {
 	// Upload sube un archivo al store y retorna la URL pública.
 	Upload(ctx context.Context, key string, r io.Reader, mimeType string, sizeBytes int64) (url string, err error)
 
-	// Delete elimina un archivo del store por su key.
+	// Delete elimina un archivo del store por su key o por la URL pública devuelta por Upload.
 	Delete(ctx context.Context, key string) error
 
 	// PresignedURL genera una URL firmada con TTL para acceso temporal.

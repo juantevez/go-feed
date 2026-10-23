@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -46,8 +47,10 @@ func (s *Store) Upload(ctx context.Context, key string, r io.Reader, mimeType st
 	return s.baseURL + "/" + key, nil
 }
 
-// Delete elimina un objeto del bucket.
+// Delete elimina un objeto del bucket. Acepta la key o la URL pública que
+// devolvió Upload (los posts solo guardan la URL).
 func (s *Store) Delete(ctx context.Context, key string) error {
+	key = strings.TrimPrefix(key, s.baseURL+"/")
 	_, err := s.client.DeleteObject(ctx, &awss3.DeleteObjectInput{
 		Bucket: aws.String(s.bucket),
 		Key:    aws.String(key),

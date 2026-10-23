@@ -9,9 +9,11 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/juantevez/my-ig/content-service/internal/domain/post"
+	"github.com/juantevez/my-ig/shared/outbox"
 )
 
 // PostRepository implementa post.Repository sobre Postgres.
+// Usa la tx del context si existe (outbox.Conn), así participa de TxManager.WithinTx.
 type PostRepository struct {
 	db *pgxpool.Pool
 }
@@ -25,7 +27,7 @@ func (r *PostRepository) Save(ctx context.Context, p *post.Post) error {
 		INSERT INTO posts (id, author_id, caption, status, visibility, media_urls, tags, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`
 
-	_, err := r.db.Exec(ctx, q,
+	_, err := outbox.Conn(ctx, r.db).Exec(ctx, q,
 		p.ID, p.AuthorID, p.Caption,
 		string(p.Status), string(p.Visibility),
 		p.MediaURLs, p.Tags,
@@ -43,7 +45,7 @@ func (r *PostRepository) FindByID(ctx context.Context, id uuid.UUID) (*post.Post
 		       created_at, updated_at, deleted_at
 		FROM posts WHERE id = $1`
 
-	p, err := scanPost(r.db.QueryRow(ctx, q, id))
+	p, err := scanPost(outbox.Conn(ctx, r.db).QueryRow(ctx, q, id))
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, post.ErrPostNotFound
@@ -60,7 +62,7 @@ func (r *PostRepository) Update(ctx context.Context, p *post.Post) error {
 		    media_urls = $4, tags = $5, updated_at = $6, deleted_at = $7
 		WHERE id = $8`
 
-	tag, err := r.db.Exec(ctx, q,
+	tag, err := outbox.Conn(ctx, r.db).Exec(ctx, q,
 		p.Caption, string(p.Status), string(p.Visibility),
 		p.MediaURLs, p.Tags, p.UpdatedAt, p.DeletedAt,
 		p.ID,
@@ -83,7 +85,7 @@ func (r *PostRepository) FindByAuthor(ctx context.Context, authorID uuid.UUID, l
 		ORDER BY created_at DESC
 		LIMIT $2 OFFSET $3`
 
-	rows, err := r.db.Query(ctx, q, authorID, limit, offset)
+	rows, err := outbox.Conn(ctx, r.db).Query(ctx, q, authorID, limit, offset)
 	if err != nil {
 		return nil, fmt.Errorf("post_repo.FindByAuthor: %w", err)
 	}

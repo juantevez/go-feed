@@ -18,10 +18,10 @@ import (
 	"github.com/nats-io/nats.go"
 
 	"github.com/juantevez/my-ig/content-service/configs"
+	"github.com/juantevez/my-ig/shared/outbox"
 	"github.com/juantevez/my-ig/content-service/internal/application/usecase"
 	"github.com/juantevez/my-ig/content-service/internal/infrastructure/http/handler"
 	"github.com/juantevez/my-ig/content-service/internal/infrastructure/http/router"
-	natspublisher "github.com/juantevez/my-ig/content-service/internal/infrastructure/messaging/nats"
 	"github.com/juantevez/my-ig/content-service/internal/infrastructure/persistence/postgres"
 	s3store "github.com/juantevez/my-ig/content-service/internal/infrastructure/storage/s3"
 )
@@ -67,10 +67,19 @@ func main() {
 	// ── Adaptadores ───────────────────────────────────────────────────────────
 	postRepo := postgres.NewPostRepository(db)
 	mediaStore := s3store.New(s3Client, cfg.S3.Bucket, cfg.S3.BaseURL)
-	publisher := natspublisher.New(js)
+	txManager := outbox.NewTxManager(db)
+	publisher := outbox.NewPublisher("content-service") // escribe en la tabla outbox, no en NATS
+
+	// ── Outbox relay (outbox → JetStream) ─────────────────────────────────────
+	relayCtx, stopRelay := context.WithCancel(context.Background())
+	relayDone := make(chan struct{})
+	go func() {
+		defer close(relayDone)
+		outbox.NewRelay(db, js).Run(relayCtx)
+	}()
 
 	// ── Use case ──────────────────────────────────────────────────────────────
-	postSvc := usecase.NewPostService(postRepo, mediaStore, publisher)
+	postSvc := usecase.NewPostService(txManager, postRepo, mediaStore, publisher)
 
 	// ── HTTP ──────────────────────────────────────────────────────────────────
 	postHandler := handler.NewPostHandler(postSvc)
@@ -102,6 +111,9 @@ func main() {
 	if err := srv.Shutdown(ctx); err != nil {
 		slog.Error("forced shutdown", "err", err)
 	}
+	// Después del HTTP: lo pendiente queda en la outbox y se publica al reiniciar.
+	stopRelay()
+	<-relayDone
 	slog.Info("server stopped")
 }
 
