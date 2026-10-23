@@ -13,9 +13,10 @@ import (
 )
 
 type Claims struct {
-	Sub  uuid.UUID
-	Role string
-	JTI  string
+	Sub       uuid.UUID
+	Role      string
+	JTI       string
+	ExpiresAt time.Time // el WebSocket cierra la conexión cuando vence el token
 }
 
 type contextKey string
@@ -133,7 +134,11 @@ func parseToken(tokenStr, secret string) (*Claims, error) {
 	if err != nil {
 		return nil, errors.New("invalid subject")
 	}
-	return &Claims{Sub: sub, Role: rc.Role, JTI: rc.ID}, nil
+	claims := &Claims{Sub: sub, Role: rc.Role, JTI: rc.ID}
+	if rc.ExpiresAt != nil {
+		claims.ExpiresAt = rc.ExpiresAt.Time
+	}
+	return claims, nil
 }
 
 func respondError(w http.ResponseWriter, status int, msg string) {

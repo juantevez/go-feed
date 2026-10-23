@@ -2,6 +2,7 @@ package ws
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -16,8 +17,14 @@ import (
 
 func newTestServer(t *testing.T, hub *Hub, userID uuid.UUID) string {
 	t.Helper()
+	return newSessionServer(t, hub, func() Session { return Session{UserID: userID, TokenID: uuid.NewString()} })
+}
+
+// newSessionServer sirve /ws con la sesión que devuelva session en cada conexión.
+func newSessionServer(t *testing.T, hub *Hub, session func() Session) string {
+	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hub.ServeWS(w, r, userID)
+		hub.ServeWS(w, r, session())
 	}))
 	t.Cleanup(srv.Close)
 	return "ws" + strings.TrimPrefix(srv.URL, "http")
@@ -132,5 +139,65 @@ func TestPushReachesEveryConnectionOfTheUser(t *testing.T) {
 		if err != nil || !strings.Contains(string(msg), n.ID.String()) {
 			t.Errorf("read = %q, %v; want the notification", msg, err)
 		}
+	}
+}
+
+// closeCode lee hasta que el servidor cierre la conexión y retorna el código.
+func closeCode(t *testing.T, conn *websocket.Conn, within time.Duration) int {
+	t.Helper()
+	conn.SetReadDeadline(time.Now().Add(within))
+	for {
+		_, _, err := conn.ReadMessage()
+		if err == nil {
+			continue
+		}
+		var ce *websocket.CloseError
+		if errors.As(err, &ce) {
+			return ce.Code
+		}
+		t.Fatalf("connection not closed by the server within %v: %v", within, err)
+	}
+}
+
+func TestConnectionClosesWhenTokenExpires(t *testing.T) {
+	hub, userID := NewHub(), uuid.New()
+	url := newSessionServer(t, hub, func() Session {
+		return Session{UserID: userID, TokenID: "jti", ExpiresAt: time.Now().Add(300 * time.Millisecond)}
+	})
+	conn := dial(t, url)
+
+	if code := closeCode(t, conn, 2*time.Second); code != CloseTokenExpired {
+		t.Errorf("close code = %d, want %d (token expired)", code, CloseTokenExpired)
+	}
+	waitConnected(t, hub, userID, 0)
+}
+
+// Logout con un token cierra solo las conexiones abiertas con ese token: otra
+// sesión del mismo usuario sigue abierta.
+func TestRevokeTokenClosesOnlyThatSession(t *testing.T) {
+	hub, userID := NewHub(), uuid.New()
+	tokens := make(chan string, 2)
+	tokens <- "jti-logout"
+	tokens <- "jti-other"
+	url := newSessionServer(t, hub, func() Session {
+		return Session{UserID: userID, TokenID: <-tokens, ExpiresAt: time.Now().Add(time.Hour)}
+	})
+	loggedOut := dial(t, url)
+	waitConnected(t, hub, userID, 1)
+	other := dial(t, url)
+	waitConnected(t, hub, userID, 2)
+
+	hub.RevokeToken("jti-logout")
+
+	if code := closeCode(t, loggedOut, 2*time.Second); code != CloseTokenRevoked {
+		t.Errorf("close code = %d, want %d (token revoked)", code, CloseTokenRevoked)
+	}
+	waitConnected(t, hub, userID, 1)
+
+	n := &notification.Notification{ID: uuid.New(), Type: notification.TypeNewFollower}
+	_ = hub.Push(context.Background(), userID, n)
+	other.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, msg, err := other.ReadMessage(); err != nil || !strings.Contains(string(msg), n.ID.String()) {
+		t.Errorf("other session: read = %q, %v; want the notification", msg, err)
 	}
 }

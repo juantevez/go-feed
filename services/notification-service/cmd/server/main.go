@@ -76,6 +76,8 @@ func main() {
 		os.Exit(1)
 	}
 	defer denylist.Stop()
+	// Un logout cierra en el momento los WebSockets abiertos con ese token.
+	denylist.OnRevoke(hub.RevokeToken)
 	httpRouter := router.New(notifHandler, cfg.JWT.Secret, denylist)
 
 	srv := &http.Server{

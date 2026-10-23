@@ -101,7 +101,7 @@ func (h *NotificationHandler) ServeWS(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
-	h.hub.ServeWS(w, r, claims.Sub)
+	h.hub.ServeWS(w, r, ws.Session{UserID: claims.Sub, TokenID: claims.JTI, ExpiresAt: claims.ExpiresAt})
 }
 
 // ── response DTOs ─────────────────────────────────────────────────────────────

@@ -32,9 +32,10 @@ type Denylist struct {
 	kv      nats.KeyValue
 	watcher nats.KeyWatcher
 
-	mu      sync.RWMutex
-	revoked map[string]time.Time // jti → exp del token
-	stop    chan struct{}
+	mu        sync.RWMutex
+	revoked   map[string]time.Time // jti → exp del token
+	listeners []func(jti string)
+	stop      chan struct{}
 }
 
 // New se conecta (o crea) el bucket y carga todas las revocaciones vigentes
@@ -88,6 +89,17 @@ func (d *Denylist) IsRevoked(jti string) bool {
 	return ok && time.Now().Before(exp)
 }
 
+// OnRevoke registra fn para que se llame cada vez que llega una revocación nueva
+// (un jti que no estaba en la lista y todavía no venció). Sirve para cortar lo que
+// no pasa por IsRevoked en cada request, como una conexión WebSocket ya abierta.
+// fn corre en el goroutine del watcher: tiene que ser rápida y no bloquear.
+// Las revocaciones cargadas al arrancar (en New) no disparan fn.
+func (d *Denylist) OnRevoke(fn func(jti string)) {
+	d.mu.Lock()
+	d.listeners = append(d.listeners, fn)
+	d.mu.Unlock()
+}
+
 // Stop detiene el watcher.
 func (d *Denylist) Stop() {
 	close(d.stop)
@@ -125,8 +137,18 @@ func (d *Denylist) apply(entry nats.KeyValueEntry) {
 
 func (d *Denylist) set(jti string, exp time.Time) {
 	d.mu.Lock()
+	_, known := d.revoked[jti]
 	d.revoked[jti] = exp
+	listeners := d.listeners
 	d.mu.Unlock()
+
+	// Revoke y el watcher pueden traer el mismo jti: se avisa una sola vez.
+	if known || !time.Now().Before(exp) {
+		return
+	}
+	for _, fn := range listeners {
+		fn(jti)
+	}
 }
 
 // prune saca de memoria los tokens ya vencidos (el bucket los descarta por TTL).
