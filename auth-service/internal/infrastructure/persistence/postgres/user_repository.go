@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/juantevez/my-ig/shared/outbox"
 	"github.com/juantevez/my-ig/auth-service/internal/domain/user"
 )
 
@@ -26,7 +27,7 @@ func (r *UserRepository) Save(ctx context.Context, u *user.User) error {
 		INSERT INTO users (id, username, email, password_hash, role, is_verified, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`
 
-	_, err := r.db.Exec(ctx, q,
+	_, err := outbox.Conn(ctx, r.db).Exec(ctx, q,
 		u.ID,
 		u.Username,
 		u.Email,
@@ -52,7 +53,7 @@ func (r *UserRepository) Save(ctx context.Context, u *user.User) error {
 func (r *UserRepository) ExistsByEmail(ctx context.Context, email string) (bool, error) {
 	const q = `SELECT EXISTS(SELECT 1 FROM users WHERE email = $1)`
 	var exists bool
-	if err := r.db.QueryRow(ctx, q, email).Scan(&exists); err != nil {
+	if err := outbox.Conn(ctx, r.db).QueryRow(ctx, q, email).Scan(&exists); err != nil {
 		return false, fmt.Errorf("user_repository.ExistsByEmail: %w", err)
 	}
 	return exists, nil
@@ -64,7 +65,7 @@ func (r *UserRepository) FindByEmail(ctx context.Context, email string) (*user.U
 		SELECT id, username, email, password_hash, role, is_verified, created_at, updated_at
 		FROM users WHERE email = $1`
 
-	u, err := scanUser(r.db.QueryRow(ctx, q, email))
+	u, err := scanUser(outbox.Conn(ctx, r.db).QueryRow(ctx, q, email))
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, user.ErrUserNotFound
@@ -80,7 +81,7 @@ func (r *UserRepository) FindByID(ctx context.Context, id uuid.UUID) (*user.User
 		SELECT id, username, email, password_hash, role, is_verified, created_at, updated_at
 		FROM users WHERE id = $1`
 
-	u, err := scanUser(r.db.QueryRow(ctx, q, id))
+	u, err := scanUser(outbox.Conn(ctx, r.db).QueryRow(ctx, q, id))
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, user.ErrUserNotFound
@@ -96,7 +97,7 @@ func (r *UserRepository) FindByUsername(ctx context.Context, username string) (*
 		SELECT id, username, email, password_hash, role, is_verified, created_at, updated_at
 		FROM users WHERE username = $1`
 
-	u, err := scanUser(r.db.QueryRow(ctx, q, username))
+	u, err := scanUser(outbox.Conn(ctx, r.db).QueryRow(ctx, q, username))
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, user.ErrUserNotFound
@@ -114,7 +115,7 @@ func (r *UserRepository) Update(ctx context.Context, u *user.User) error {
 		    role = $4, is_verified = $5, updated_at = $6
 		WHERE id = $7`
 
-	tag, err := r.db.Exec(ctx, q,
+	tag, err := outbox.Conn(ctx, r.db).Exec(ctx, q,
 		u.Username, u.Email, u.PasswordHash,
 		string(u.Role), u.IsVerified, u.UpdatedAt, u.ID,
 	)

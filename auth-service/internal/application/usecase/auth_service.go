@@ -3,35 +3,38 @@ package usecase
 import (
 	"context"
 	"fmt"
-	"log/slog"
 
+	chimiddleware "github.com/go-chi/chi/v5/middleware"
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/juantevez/my-ig/auth-service/internal/application/port/input"
 	"github.com/juantevez/my-ig/auth-service/internal/application/port/output"
 	"github.com/juantevez/my-ig/auth-service/internal/domain/token"
 	"github.com/juantevez/my-ig/auth-service/internal/domain/user"
+	"github.com/juantevez/my-ig/shared/events"
 )
 
 const bcryptCost = 12
 
 // AuthService implements input.AuthUseCase.
 type AuthService struct {
+	tx        output.TxManager
 	users     user.Repository
 	tokens    token.Service
 	publisher output.EventPublisher
 }
 
 func NewAuthService(
+	tx output.TxManager,
 	users user.Repository,
 	tokens token.Service,
 	publisher output.EventPublisher,
 ) *AuthService {
-	return &AuthService{users: users, tokens: tokens, publisher: publisher}
+	return &AuthService{tx: tx, users: users, tokens: tokens, publisher: publisher}
 }
 
-// Register creates a new user account, hashes the password and publishes
-// the auth.user.registered.v1 event (fire-and-forget).
+// Register creates a new user account and hashes the password.
+// The user and the auth.user.registered.v1 event are persisted in the same tx (outbox).
 func (s *AuthService) Register(ctx context.Context, cmd input.RegisterCommand) (*input.RegisterResult, error) {
 	taken, err := s.users.ExistsByEmail(ctx, cmd.Email)
 	if err != nil {
@@ -51,17 +54,25 @@ func (s *AuthService) Register(ctx context.Context, cmd input.RegisterCommand) (
 		return nil, fmt.Errorf("register: build user: %w", err)
 	}
 
-	if err := s.users.Save(ctx, u); err != nil {
-		return nil, fmt.Errorf("register: save: %w", err)
+	traceID := chimiddleware.GetReqID(ctx)
+	err = s.tx.WithinTx(ctx, func(ctx context.Context) error {
+		if err := s.users.Save(ctx, u); err != nil {
+			return fmt.Errorf("register: save: %w", err)
+		}
+		if err := s.publisher.Publish(ctx, events.TopicAuthUserRegistered, user.NewRegisteredEnvelope(u, traceID)); err != nil {
+			return fmt.Errorf("register: enqueue event: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
-
-	s.publishAsync(user.TopicRegistered, user.NewRegisteredEvent(u), u.ID.String())
 
 	return &input.RegisterResult{UserID: u.ID}, nil
 }
 
 // Login verifies credentials and returns a fresh JWT pair.
-// Publishes auth.user.logged_in.v1 on success.
+// The refresh token and the auth.user.logged_in.v1 event are persisted in the same tx (outbox).
 func (s *AuthService) Login(ctx context.Context, cmd input.LoginCommand) (*input.LoginResult, error) {
 	u, err := s.users.FindByEmail(ctx, cmd.Email)
 	if err != nil {
@@ -73,12 +84,22 @@ func (s *AuthService) Login(ctx context.Context, cmd input.LoginCommand) (*input
 		return nil, user.ErrInvalidCredentials
 	}
 
-	pair, err := s.tokens.GeneratePair(ctx, u.ID, string(u.Role))
+	var pair *token.Pair
+	traceID := chimiddleware.GetReqID(ctx)
+	err = s.tx.WithinTx(ctx, func(ctx context.Context) error {
+		var err error
+		pair, err = s.tokens.GeneratePair(ctx, u.ID, string(u.Role))
+		if err != nil {
+			return fmt.Errorf("login: generate tokens: %w", err)
+		}
+		if err := s.publisher.Publish(ctx, events.TopicAuthUserLoggedIn, user.NewLoggedInEnvelope(u, traceID)); err != nil {
+			return fmt.Errorf("login: enqueue event: %w", err)
+		}
+		return nil
+	})
 	if err != nil {
-		return nil, fmt.Errorf("login: generate tokens: %w", err)
+		return nil, err
 	}
-
-	s.publishAsync(user.TopicLoggedIn, user.NewLoggedInEvent(u), u.ID.String())
 
 	return &input.LoginResult{
 		AccessToken:  pair.AccessToken,
@@ -104,20 +125,4 @@ func (s *AuthService) Logout(ctx context.Context, cmd input.LogoutCommand) error
 		return fmt.Errorf("logout: revoke token: %w", err)
 	}
 	return nil
-}
-
-// ── internal ─────────────────────────────────────────────────────────────────
-
-// publishAsync emits a domain event in a background goroutine.
-// A failure here never rolls back the operation — consumers reconcile from DB.
-func (s *AuthService) publishAsync(topic string, event any, userID string) {
-	go func() {
-		if err := s.publisher.Publish(context.Background(), topic, event); err != nil {
-			slog.Error("event publish failed",
-				"topic", topic,
-				"user_id", userID,
-				"err", err,
-			)
-		}
-	}()
 }

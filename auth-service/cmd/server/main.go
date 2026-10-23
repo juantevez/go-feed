@@ -14,11 +14,11 @@ import (
 	"github.com/nats-io/nats.go"
 
 	"github.com/juantevez/my-ig/auth-service/configs"
+	"github.com/juantevez/my-ig/shared/outbox"
 	"github.com/juantevez/my-ig/auth-service/internal/application/usecase"
 	"github.com/juantevez/my-ig/auth-service/internal/infrastructure/http/handler"
 	"github.com/juantevez/my-ig/auth-service/internal/infrastructure/http/router"
 	jwtadapter "github.com/juantevez/my-ig/auth-service/internal/infrastructure/jwt"
-	natsadapter "github.com/juantevez/my-ig/auth-service/internal/infrastructure/messaging/nats"
 	"github.com/juantevez/my-ig/auth-service/internal/infrastructure/persistence/postgres"
 )
 
@@ -57,7 +57,8 @@ func main() {
 	// ── Adaptadores (driven ports) ───────────────────────────────────────────
 	userRepo := postgres.NewUserRepository(db)
 	refreshTokenRepo := postgres.NewRefreshTokenRepository(db)
-	publisher := natsadapter.NewPublisher(js)
+	txManager := outbox.NewTxManager(db)
+	publisher := outbox.NewPublisher("auth-service") // escribe en la tabla outbox, no en NATS
 	tokenSvc := jwtadapter.New(
 		cfg.JWT.Secret,
 		cfg.JWT.AccessTokenTTL,
@@ -65,8 +66,16 @@ func main() {
 		refreshTokenRepo,
 	)
 
+	// ── Outbox relay (outbox → JetStream) ────────────────────────────────────
+	relayCtx, stopRelay := context.WithCancel(context.Background())
+	relayDone := make(chan struct{})
+	go func() {
+		defer close(relayDone)
+		outbox.NewRelay(db, js).Run(relayCtx)
+	}()
+
 	// ── Caso de uso ──────────────────────────────────────────────────────────
-	authSvc := usecase.NewAuthService(userRepo, tokenSvc, publisher)
+	authSvc := usecase.NewAuthService(txManager, userRepo, tokenSvc, publisher)
 
 	// ── HTTP ─────────────────────────────────────────────────────────────────
 	authHandler := handler.NewAuthHandler(authSvc)
@@ -100,6 +109,9 @@ func main() {
 	if err := srv.Shutdown(ctx); err != nil {
 		slog.Error("forced shutdown", "err", err)
 	}
+	// Después del HTTP: lo pendiente queda en la outbox y se publica al reiniciar.
+	stopRelay()
+	<-relayDone
 	slog.Info("server stopped")
 }
 
