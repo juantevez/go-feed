@@ -13,11 +13,11 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
 
+	"github.com/juantevez/my-ig/shared/outbox"
 	"github.com/juantevez/my-ig/social-service/configs"
 	"github.com/juantevez/my-ig/social-service/internal/application/usecase"
 	"github.com/juantevez/my-ig/social-service/internal/infrastructure/http/handler"
 	"github.com/juantevez/my-ig/social-service/internal/infrastructure/http/router"
-	natspublisher "github.com/juantevez/my-ig/social-service/internal/infrastructure/messaging/nats"
 	"github.com/juantevez/my-ig/social-service/internal/infrastructure/persistence/postgres"
 )
 
@@ -50,10 +50,19 @@ func main() {
 
 	// ── Adaptadores ───────────────────────────────────────────────────────────
 	followRepo := postgres.NewFollowRepository(db)
-	publisher := natspublisher.New(js)
+	txManager := outbox.NewTxManager(db)
+	publisher := outbox.NewPublisher("social-service") // escribe en la tabla outbox, no en NATS
+
+	// ── Outbox relay (outbox → JetStream) ─────────────────────────────────────
+	relayCtx, stopRelay := context.WithCancel(context.Background())
+	relayDone := make(chan struct{})
+	go func() {
+		defer close(relayDone)
+		outbox.NewRelay(db, js).Run(relayCtx)
+	}()
 
 	// ── Use case ──────────────────────────────────────────────────────────────
-	followSvc := usecase.NewFollowService(followRepo, publisher)
+	followSvc := usecase.NewFollowService(txManager, followRepo, publisher)
 
 	// ── HTTP ──────────────────────────────────────────────────────────────────
 	followHandler := handler.NewFollowHandler(followSvc)
@@ -85,6 +94,9 @@ func main() {
 	if err := srv.Shutdown(ctx); err != nil {
 		slog.Error("forced shutdown", "err", err)
 	}
+	// Después del HTTP: lo pendiente queda en la outbox y se publica al reiniciar.
+	stopRelay()
+	<-relayDone
 	slog.Info("server stopped")
 }
 
@@ -111,7 +123,7 @@ func connectNATS(cfg configs.NATSConfig) (nats.JetStreamContext, *nats.Conn, err
 	nc, err := nats.Connect(cfg.URL,
 		nats.Timeout(cfg.ConnectTimeout),
 		nats.RetryOnFailedConnect(true),
-		nats.MaxReconnects(5),
+		nats.MaxReconnects(-1), // el relay depende de la conexión: reconectar siempre
 	)
 	if err != nil {
 		return nil, nil, fmt.Errorf("nats connect: %w", err)

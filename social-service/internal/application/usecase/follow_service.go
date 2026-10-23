@@ -3,7 +3,6 @@ package usecase
 import (
 	"context"
 	"fmt"
-	"log/slog"
 
 	chimiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
@@ -15,17 +14,18 @@ import (
 
 // FollowService implementa input.FollowUseCase.
 type FollowService struct {
+	tx        output.TxManager
 	follows   follow.Repository
 	publisher output.EventPublisher
 }
 
-func NewFollowService(follows follow.Repository, publisher output.EventPublisher) *FollowService {
-	return &FollowService{follows: follows, publisher: publisher}
+func NewFollowService(tx output.TxManager, follows follow.Repository, publisher output.EventPublisher) *FollowService {
+	return &FollowService{tx: tx, follows: follows, publisher: publisher}
 }
 
 // Follow crea la relación follower → following.
 // Detecta si la relación es mutua y actualiza ambos lados.
-// Publica users.followed.v1 al bus (fire-and-forget).
+// La relación y el evento users.followed.v1 se persisten en la misma tx (outbox).
 func (s *FollowService) Follow(ctx context.Context, cmd input.FollowCommand) error {
 	// Validar en el dominio (auto-follow, UUIDs nulos)
 	f, err := follow.New(cmd.FollowerID, cmd.FollowingID)
@@ -33,46 +33,55 @@ func (s *FollowService) Follow(ctx context.Context, cmd input.FollowCommand) err
 		return fmt.Errorf("follow: %w", err)
 	}
 
-	// Persistir la relación
-	if err := s.follows.Save(ctx, f); err != nil {
-		return fmt.Errorf("follow: save: %w", err)
-	}
-
-	// Detectar mutualidad: ¿followingID ya sigue a followerID?
-	mutual, err := s.follows.Exists(ctx, cmd.FollowingID, cmd.FollowerID)
-	if err == nil && mutual {
-		f.Mutual = true
-		if err := s.follows.UpdateMutual(ctx, cmd.FollowerID, cmd.FollowingID, true); err != nil {
-			slog.Warn("follow: update mutual failed", "err", err)
-		}
-	}
-
 	traceID := chimiddleware.GetReqID(ctx)
-	s.publishAsync(events.TopicUserFollowed, follow.NewFollowedEnvelope(f, traceID))
 
-	return nil
+	return s.tx.WithinTx(ctx, func(ctx context.Context) error {
+		// Persistir la relación
+		if err := s.follows.Save(ctx, f); err != nil {
+			return fmt.Errorf("follow: save: %w", err)
+		}
+
+		// Detectar mutualidad: ¿followingID ya sigue a followerID?
+		mutual, err := s.follows.Exists(ctx, cmd.FollowingID, cmd.FollowerID)
+		if err != nil {
+			return fmt.Errorf("follow: check mutual: %w", err)
+		}
+		if mutual {
+			f.Mutual = true
+			if err := s.follows.UpdateMutual(ctx, cmd.FollowerID, cmd.FollowingID, true); err != nil {
+				return fmt.Errorf("follow: update mutual: %w", err)
+			}
+		}
+
+		if err := s.publisher.Publish(ctx, events.TopicUserFollowed, follow.NewFollowedEnvelope(f, traceID)); err != nil {
+			return fmt.Errorf("follow: enqueue event: %w", err)
+		}
+		return nil
+	})
 }
 
 // Unfollow elimina la relación follower → following.
 // Si era mutua, actualiza el flag en la relación inversa.
-// Publica users.unfollowed.v1 al bus (fire-and-forget).
+// La baja y el evento users.unfollowed.v1 se persisten en la misma tx (outbox).
 func (s *FollowService) Unfollow(ctx context.Context, cmd input.UnfollowCommand) error {
-	if err := s.follows.Delete(ctx, cmd.FollowerID, cmd.FollowingID); err != nil {
-		return fmt.Errorf("unfollow: %w", err)
-	}
-
-	// Si era mutua, limpiar el flag en la dirección inversa
-	if err := s.follows.UpdateMutual(ctx, cmd.FollowingID, cmd.FollowerID, false); err != nil {
-		slog.Warn("unfollow: clear mutual failed", "err", err)
-	}
-
 	traceID := chimiddleware.GetReqID(ctx)
-	s.publishAsync(
-		events.TopicUserUnfollowed,
-		follow.NewUnfollowedEnvelope(cmd.FollowerID, cmd.FollowingID, traceID),
-	)
 
-	return nil
+	return s.tx.WithinTx(ctx, func(ctx context.Context) error {
+		if err := s.follows.Delete(ctx, cmd.FollowerID, cmd.FollowingID); err != nil {
+			return fmt.Errorf("unfollow: %w", err)
+		}
+
+		// Si era mutua, limpiar el flag en la dirección inversa
+		if err := s.follows.UpdateMutual(ctx, cmd.FollowingID, cmd.FollowerID, false); err != nil {
+			return fmt.Errorf("unfollow: clear mutual: %w", err)
+		}
+
+		envelope := follow.NewUnfollowedEnvelope(cmd.FollowerID, cmd.FollowingID, traceID)
+		if err := s.publisher.Publish(ctx, events.TopicUserUnfollowed, envelope); err != nil {
+			return fmt.Errorf("unfollow: enqueue event: %w", err)
+		}
+		return nil
+	})
 }
 
 // GetFollowers retorna los seguidores de un usuario.
@@ -105,18 +114,6 @@ func (s *FollowService) GetStats(ctx context.Context, userID uuid.UUID) (*follow
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
-
-func (s *FollowService) publishAsync(topic string, envelope events.Envelope) {
-	go func() {
-		if err := s.publisher.Publish(context.Background(), topic, envelope); err != nil {
-			slog.Error("event publish failed",
-				"topic", topic,
-				"event_id", envelope.EventID,
-				"err", err,
-			)
-		}
-	}()
-}
 
 func clampLimit(l int) int {
 	if l <= 0 {

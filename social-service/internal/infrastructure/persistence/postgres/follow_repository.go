@@ -8,10 +8,12 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/juantevez/my-ig/shared/outbox"
 	"github.com/juantevez/my-ig/social-service/internal/domain/follow"
 )
 
 // FollowRepository implementa follow.Repository sobre Postgres.
+// Usa la tx del context si existe (outbox.Conn), así participa de TxManager.WithinTx.
 type FollowRepository struct {
 	db *pgxpool.Pool
 }
@@ -26,7 +28,7 @@ func (r *FollowRepository) Save(ctx context.Context, f *follow.Follow) error {
 		VALUES ($1, $2, $3, $4, $5)
 		ON CONFLICT (follower_id, following_id) DO NOTHING`
 
-	tag, err := r.db.Exec(ctx, q, f.ID, f.FollowerID, f.FollowingID, f.Mutual, f.CreatedAt)
+	tag, err := outbox.Conn(ctx, r.db).Exec(ctx, q, f.ID, f.FollowerID, f.FollowingID, f.Mutual, f.CreatedAt)
 	if err != nil {
 		return fmt.Errorf("follow_repo.Save: %w", err)
 	}
@@ -38,7 +40,7 @@ func (r *FollowRepository) Save(ctx context.Context, f *follow.Follow) error {
 
 func (r *FollowRepository) Delete(ctx context.Context, followerID, followingID uuid.UUID) error {
 	const q = `DELETE FROM follows WHERE follower_id = $1 AND following_id = $2`
-	tag, err := r.db.Exec(ctx, q, followerID, followingID)
+	tag, err := outbox.Conn(ctx, r.db).Exec(ctx, q, followerID, followingID)
 	if err != nil {
 		return fmt.Errorf("follow_repo.Delete: %w", err)
 	}
@@ -51,7 +53,7 @@ func (r *FollowRepository) Delete(ctx context.Context, followerID, followingID u
 func (r *FollowRepository) Exists(ctx context.Context, followerID, followingID uuid.UUID) (bool, error) {
 	const q = `SELECT EXISTS(SELECT 1 FROM follows WHERE follower_id = $1 AND following_id = $2)`
 	var exists bool
-	if err := r.db.QueryRow(ctx, q, followerID, followingID).Scan(&exists); err != nil {
+	if err := outbox.Conn(ctx, r.db).QueryRow(ctx, q, followerID, followingID).Scan(&exists); err != nil {
 		return false, fmt.Errorf("follow_repo.Exists: %w", err)
 	}
 	return exists, nil
@@ -87,7 +89,7 @@ func (r *FollowRepository) GetStats(ctx context.Context, userID uuid.UUID) (*fol
 
 	var stats follow.Stats
 	stats.UserID = userID
-	err := r.db.QueryRow(ctx, q, userID).Scan(&stats.FollowerCount, &stats.FollowingCount)
+	err := outbox.Conn(ctx, r.db).QueryRow(ctx, q, userID).Scan(&stats.FollowerCount, &stats.FollowingCount)
 	if err != nil {
 		return nil, fmt.Errorf("follow_repo.GetStats: %w", err)
 	}
@@ -96,7 +98,7 @@ func (r *FollowRepository) GetStats(ctx context.Context, userID uuid.UUID) (*fol
 
 func (r *FollowRepository) UpdateMutual(ctx context.Context, followerID, followingID uuid.UUID, mutual bool) error {
 	const q = `UPDATE follows SET mutual = $1 WHERE follower_id = $2 AND following_id = $3`
-	_, err := r.db.Exec(ctx, q, mutual, followerID, followingID)
+	_, err := outbox.Conn(ctx, r.db).Exec(ctx, q, mutual, followerID, followingID)
 	if err != nil {
 		return fmt.Errorf("follow_repo.UpdateMutual: %w", err)
 	}
@@ -106,7 +108,7 @@ func (r *FollowRepository) UpdateMutual(ctx context.Context, followerID, followi
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 func (r *FollowRepository) queryFollows(ctx context.Context, q string, userID uuid.UUID, limit, offset int) ([]*follow.Follow, error) {
-	rows, err := r.db.Query(ctx, q, userID, limit, offset)
+	rows, err := outbox.Conn(ctx, r.db).Query(ctx, q, userID, limit, offset)
 	if err != nil {
 		return nil, fmt.Errorf("follow_repo query: %w", err)
 	}
