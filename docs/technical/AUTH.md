@@ -56,13 +56,16 @@ Dependencias de `shared/`:
 |---|---|
 | `ID` | UUID generado en `user.New` |
 | `Username` | `^[a-zA-Z0-9_]{3,50}$`, se recortan espacios. Único en DB. |
-| `Email` | Se normaliza a minúsculas y sin espacios. Formato validado por regex. Único en DB. |
+| `Email` | Se normaliza con `user.NormalizeEmail` (minúsculas, sin espacios) al registrar **y al buscar** en login, así `Juan@X.com` y `juan@x.com` son la misma cuenta. Formato validado por regex. Único en DB. |
 | `PasswordHash` | bcrypt con costo 12. El dominio recibe el hash, nunca la contraseña. |
 | `Role` | `user` (default) o `admin`. Viaja en el claim `role` del JWT. |
 | `IsVerified` | Siempre `false`: no hay flujo de verificación de email todavía. |
 
 La contraseña en texto plano solo existe en el handler y en `AuthService.Register` (para hashearla).
 El handler exige al menos 8 caracteres.
+
+Las violaciones de invariantes se devuelven como `*user.ValidationError{Field, Msg}`: el handler
+las traduce a `400` con `Msg` como mensaje.
 
 ### `Token`
 
@@ -95,9 +98,9 @@ ejemplos en la colección de Postman ([`api/postman/`](../../api/postman/)).
 | Status | Cuándo |
 |---|---|
 | `201` | Usuario creado. Se encola `auth.user.registered.v1` en la misma transacción. |
-| `400` | Body inválido, campos vacíos o contraseña de menos de 8 caracteres. |
+| `400` | Body inválido, campos vacíos, contraseña de menos de 8 caracteres, o username/email con formato inválido. El `error` dice el motivo (ej. `"email format is invalid"`). |
 | `409` | Email o username ya registrados (ver [limitaciones](#limitaciones-conocidas)). |
-| `500` | Error inesperado, **o username/email con formato inválido** (ver limitaciones). |
+| `500` | Error inesperado. |
 
 ### `POST /auth/login`
 
@@ -109,7 +112,12 @@ ejemplos en la colección de Postman ([`api/postman/`](../../api/postman/)).
 |---|---|
 | `200` | Credenciales válidas. Se persiste el refresh token y se encola `auth.user.logged_in.v1`, ambos en una transacción. |
 | `400` | Body inválido o campos vacíos. |
-| `401` | `invalid credentials`: mismo mensaje si el email no existe o si la contraseña es incorrecta. |
+| `401` | `invalid credentials`: mismo mensaje **y mismo tiempo de respuesta** si el email no existe o si la contraseña es incorrecta. |
+| `500` | Error inesperado (ej. Postgres caído). No se reporta como credenciales inválidas. |
+
+Cuando el email no existe, `Login` igual hace un `bcrypt.Compare` contra un hash de relleno con el
+mismo costo. Sin eso, esa respuesta tardaba ~2 ms contra ~550 ms de una contraseña incorrecta, y
+el tiempo revelaba qué emails están registrados.
 
 ### `POST /auth/refresh`
 
@@ -307,7 +315,8 @@ make test                             # incluye los tests de auth-service
   después detiene el relay. Los eventos pendientes quedan en `outbox` y se publican al reiniciar.
 - **Tests:** [`auth_service_register_test.go`](../../services/auth-service/internal/application/usecase/auth_service_register_test.go)
   cubre `Register` (éxito, email tomado, username inválido, falla del repo y falla al encolar el
-  evento) con mocks de los puertos. No hay tests de `Login`, `Refresh` ni del adaptador JWT.
+  evento) y `Login` (email inexistente con el mismo costo que una contraseña incorrecta, error de
+  la DB) con mocks de los puertos. No hay tests de `Refresh`, `Logout` ni del adaptador JWT.
 
 ---
 
@@ -316,38 +325,31 @@ make test                             # incluye los tests de auth-service
 Verificadas contra el servicio corriendo. Ordenadas por impacto.
 
 
-1. **Enumeración de usuarios por tiempo de respuesta.** El mensaje de error es el mismo, pero si
-   el email no existe la respuesta tarda ~2 ms, y si existe ~550 ms (por el bcrypt). Se arregla
-   comparando contra un hash fijo cuando el usuario no existe.
 
-2. **Username o email con formato inválido devuelven `500`.** La validación del dominio
-   (`user.Validate`) no tiene errores tipados, así que el handler no la distingue de un error
-   interno. Debería ser `400` con el motivo.
-
-3. **Username repetido devuelve `409 "email already registered"`.** Cualquier violación de
+1. **Username repetido devuelve `409 "email already registered"`.** Cualquier violación de
    `UNIQUE` se mapea a `ErrEmailAlreadyTaken`, así que el mensaje es engañoso cuando lo repetido
    es el username.
 
-4. **`Refresh` no es atómico.** La revocación del token viejo y el insert del nuevo no van en una
+2. **`Refresh` no es atómico.** La revocación del token viejo y el insert del nuevo no van en una
    transacción: si el insert falla, el token viejo queda revocado y el cliente tiene que volver a
    hacer login.
 
-5. **No hay detección de reuso de refresh tokens.** Reusar un refresh token ya rotado da `401`,
+3. **No hay detección de reuso de refresh tokens.** Reusar un refresh token ya rotado da `401`,
    pero no revoca la familia de tokens de ese usuario. Esa revocación es la práctica estándar
    para detectar un token robado; `RevokeAllForUser` ya existe en el repositorio y no se usa.
 
-6. **Código y tablas sin uso:**
+4. **Código y tablas sin uso:**
    - La tabla `idempotency_keys` (migración `0002`) no la usa nadie.
    - `RefreshTokenRepository.DeleteExpired` no se llama: `refresh_tokens` crece sin límite.
    - `IsVerified` nunca pasa a `true`.
 
-7. **Secreto simétrico compartido.** Con HS256, cualquier servicio que valida tokens también
+5. **Secreto simétrico compartido.** Con HS256, cualquier servicio que valida tokens también
    puede emitirlos. RS256/EdDSA (auth firma con la clave privada, el resto valida con la pública)
    lo evitaría; el comentario de `jwt_service.go` ya lo menciona.
 
-8. **CORS fijo a `http://localhost:5173`.** El front usa el proxy de Vite/nginx (mismo origen),
+6. **CORS fijo a `http://localhost:5173`.** El front usa el proxy de Vite/nginx (mismo origen),
     así que hoy no molesta, pero cualquier otro origen que llame directo al servicio es rechazado.
 
-9. **El logout depende de NATS.** Si el bucket KV no está disponible, el logout responde `500`
+7. **El logout depende de NATS.** Si el bucket KV no está disponible, el logout responde `500`
     y el access token sigue valiendo hasta que el cliente reintente. La revocación del refresh
     token en Postgres sí se aplica, porque va primero.
