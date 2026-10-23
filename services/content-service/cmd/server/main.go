@@ -24,6 +24,7 @@ import (
 	"github.com/juantevez/my-ig/content-service/internal/infrastructure/persistence/postgres"
 	s3store "github.com/juantevez/my-ig/content-service/internal/infrastructure/storage/s3"
 	"github.com/juantevez/my-ig/shared/outbox"
+	"github.com/juantevez/my-ig/shared/revocation"
 )
 
 func main() {
@@ -83,7 +84,14 @@ func main() {
 
 	// ── HTTP ──────────────────────────────────────────────────────────────────
 	postHandler := handler.NewPostHandler(postSvc)
-	httpRouter := router.New(postHandler, cfg.JWT.Secret)
+	// ── Revocación de tokens (logout) ─────────────────────────────────────────
+	denylist, err := revocation.New(js)
+	if err != nil {
+		slog.Error("revocation denylist error", "err", err)
+		os.Exit(1)
+	}
+	defer denylist.Stop()
+	httpRouter := router.New(postHandler, cfg.JWT.Secret, denylist)
 
 	srv := &http.Server{
 		Addr:         fmt.Sprintf(":%s", cfg.HTTP.Port),

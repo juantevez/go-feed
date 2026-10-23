@@ -166,19 +166,20 @@ func (h *AuthHandler) Refresh(w http.ResponseWriter, r *http.Request) {
 
 // Logout handles POST /auth/logout → 204
 // Expects: Authorization: Bearer <access_token>
-// The JTI is extracted from the Bearer token by the JWT middleware and
-// stored in the request context. Here we just read it.
+// The claims (jti, exp) are extracted by the JWT middleware. After logout the
+// access token is rejected by every service and its refresh token can't be used.
 func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 	reqID := chimiddleware.GetReqID(r.Context())
 
-	jti, ok := middleware.JTIFromContext(r.Context())
-	if !ok || jti == "" {
+	claims, ok := middleware.ClaimsFromContext(r.Context())
+	if !ok || claims.JTI == "" {
 		slog.Warn("logout: missing or invalid token", "request_id", reqID)
 		respondError(w, http.StatusUnauthorized, "missing or invalid token")
 		return
 	}
+	jti := claims.JTI
 
-	if err := h.auth.Logout(r.Context(), input.LogoutCommand{JTI: jti}); err != nil {
+	if err := h.auth.Logout(r.Context(), input.LogoutCommand{JTI: jti, ExpiresAt: claims.ExpiresAt}); err != nil {
 		slog.Error("logout: failed", "request_id", reqID, "jti", jti, "err", err)
 		respondError(w, http.StatusInternalServerError, "logout failed")
 		return

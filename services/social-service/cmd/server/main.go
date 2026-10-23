@@ -14,6 +14,7 @@ import (
 	"github.com/nats-io/nats.go"
 
 	"github.com/juantevez/my-ig/shared/outbox"
+	"github.com/juantevez/my-ig/shared/revocation"
 	"github.com/juantevez/my-ig/social-service/configs"
 	"github.com/juantevez/my-ig/social-service/internal/application/usecase"
 	"github.com/juantevez/my-ig/social-service/internal/infrastructure/http/handler"
@@ -66,7 +67,14 @@ func main() {
 
 	// ── HTTP ──────────────────────────────────────────────────────────────────
 	followHandler := handler.NewFollowHandler(followSvc)
-	httpRouter := router.New(followHandler, cfg.JWT.Secret)
+	// ── Revocación de tokens (logout) ─────────────────────────────────────────
+	denylist, err := revocation.New(js)
+	if err != nil {
+		slog.Error("revocation denylist error", "err", err)
+		os.Exit(1)
+	}
+	defer denylist.Stop()
+	httpRouter := router.New(followHandler, cfg.JWT.Secret, denylist)
 
 	srv := &http.Server{
 		Addr:         fmt.Sprintf(":%s", cfg.HTTP.Port),

@@ -10,7 +10,7 @@ import (
 	socialmw "github.com/juantevez/my-ig/social-service/internal/infrastructure/http/middleware"
 )
 
-func New(follow *handler.FollowHandler, jwtSecret string) http.Handler {
+func New(follow *handler.FollowHandler, jwtSecret string, revoked socialmw.RevocationChecker) http.Handler {
 	r := chi.NewRouter()
 
 	r.Use(cors.Handler(cors.Options{
@@ -39,7 +39,7 @@ func New(follow *handler.FollowHandler, jwtSecret string) http.Handler {
 
 	// Rutas protegidas — requieren JWT
 	r.Group(func(r chi.Router) {
-		r.Use(socialmw.JWTMiddleware(jwtSecret))
+		r.Use(socialmw.JWTMiddleware(jwtSecret, revoked))
 		r.Post("/follow/{target_id}", follow.Follow)
 		r.Delete("/follow/{target_id}", follow.Unfollow)
 	})

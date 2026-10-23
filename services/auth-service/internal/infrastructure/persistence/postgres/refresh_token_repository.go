@@ -24,11 +24,11 @@ func NewRefreshTokenRepository(db *pgxpool.Pool) *RefreshTokenRepository {
 // Save inserts a new refresh token record.
 func (r *RefreshTokenRepository) Save(ctx context.Context, t *domaintoken.Token) error {
 	const q = `
-		INSERT INTO refresh_tokens (id, user_id, jti, expires_at, revoked, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6)`
+		INSERT INTO refresh_tokens (id, user_id, jti, access_jti, expires_at, revoked, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)`
 
 	_, err := outbox.Conn(ctx, r.db).Exec(ctx, q,
-		t.ID, t.UserID, t.JTI, t.ExpiresAt, t.Revoked, t.CreatedAt,
+		t.ID, t.UserID, t.JTI, t.AccessJTI, t.ExpiresAt, t.Revoked, t.CreatedAt,
 	)
 	if err != nil {
 		return fmt.Errorf("refresh_token_repo.Save: %w", err)
@@ -69,6 +69,21 @@ func (r *RefreshTokenRepository) Revoke(ctx context.Context, jti string) error {
 	}
 	if tag.RowsAffected() == 0 {
 		return domaintoken.ErrTokenInvalid
+	}
+	return nil
+}
+
+// RevokeByAccessJTI revokes the refresh token issued together with the given
+// access token. Idempotent: no matching active row is not an error (already
+// revoked, rotated, or issued before access_jti existed).
+func (r *RefreshTokenRepository) RevokeByAccessJTI(ctx context.Context, accessJTI string) error {
+	const q = `
+		UPDATE refresh_tokens
+		SET revoked = TRUE, revoked_at = $1
+		WHERE access_jti = $2 AND revoked = FALSE`
+
+	if _, err := outbox.Conn(ctx, r.db).Exec(ctx, q, time.Now().UTC(), accessJTI); err != nil {
+		return fmt.Errorf("refresh_token_repo.RevokeByAccessJTI: %w", err)
 	}
 	return nil
 }

@@ -20,6 +20,7 @@ import (
 	natsconsumer "github.com/juantevez/my-ig/notification-service/internal/infrastructure/messaging/nats"
 	"github.com/juantevez/my-ig/notification-service/internal/infrastructure/persistence/postgres"
 	"github.com/juantevez/my-ig/notification-service/internal/infrastructure/ws"
+	"github.com/juantevez/my-ig/shared/revocation"
 )
 
 func main() {
@@ -66,7 +67,14 @@ func main() {
 
 	// ── HTTP + WebSocket ───────────────────────────────────────────────────────
 	notifHandler := httphandler.NewNotificationHandler(notifSvc, hub)
-	httpRouter := router.New(notifHandler, cfg.JWT.Secret)
+	// ── Revocación de tokens (logout) ─────────────────────────────────────────
+	denylist, err := revocation.New(js)
+	if err != nil {
+		slog.Error("revocation denylist error", "err", err)
+		os.Exit(1)
+	}
+	defer denylist.Stop()
+	httpRouter := router.New(notifHandler, cfg.JWT.Secret, denylist)
 
 	srv := &http.Server{
 		Addr:         fmt.Sprintf(":%s", cfg.HTTP.Port),

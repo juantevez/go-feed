@@ -9,7 +9,7 @@ import (
 	notifmw "github.com/juantevez/my-ig/notification-service/internal/infrastructure/http/middleware"
 )
 
-func New(notif *handler.NotificationHandler, jwtSecret string) http.Handler {
+func New(notif *handler.NotificationHandler, jwtSecret string, revoked notifmw.RevocationChecker) http.Handler {
 	r := chi.NewRouter()
 
 	r.Use(middleware.RequestID)
@@ -26,7 +26,7 @@ func New(notif *handler.NotificationHandler, jwtSecret string) http.Handler {
 
 	// Todas las rutas requieren JWT
 	r.Group(func(r chi.Router) {
-		r.Use(notifmw.JWTMiddleware(jwtSecret))
+		r.Use(notifmw.JWTMiddleware(jwtSecret, revoked))
 
 		r.Get("/notifications", notif.GetNotifications)
 		r.Patch("/notifications/{id}/read", notif.MarkRead)

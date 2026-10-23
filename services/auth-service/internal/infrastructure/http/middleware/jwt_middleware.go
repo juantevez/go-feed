@@ -12,13 +12,10 @@ import (
 
 type contextKey string
 
-const (
-	claimsKey contextKey = "jwt_claims"
-	jtiKey    contextKey = "jwt_jti"
-)
+const claimsKey contextKey = "jwt_claims"
 
 // JWTMiddleware valida el access token del header Authorization: Bearer <token>.
-// Inyecta los claims y el JTI en el contexto para que los handlers los lean.
+// Inyecta los claims en el contexto para que los handlers los lean.
 func JWTMiddleware(svc domaintoken.Service) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -34,6 +31,8 @@ func JWTMiddleware(svc domaintoken.Service) func(http.Handler) http.Handler {
 				switch {
 				case errors.Is(err, domaintoken.ErrTokenExpired):
 					respondError(w, http.StatusUnauthorized, "token expired")
+				case errors.Is(err, domaintoken.ErrTokenRevoked):
+					respondError(w, http.StatusUnauthorized, "token revoked")
 				default:
 					respondError(w, http.StatusUnauthorized, "invalid token")
 				}
@@ -41,7 +40,6 @@ func JWTMiddleware(svc domaintoken.Service) func(http.Handler) http.Handler {
 			}
 
 			ctx := context.WithValue(r.Context(), claimsKey, claims)
-			ctx = context.WithValue(ctx, jtiKey, claims.JTI)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
@@ -51,12 +49,6 @@ func JWTMiddleware(svc domaintoken.Service) func(http.Handler) http.Handler {
 func ClaimsFromContext(ctx context.Context) (*domaintoken.Claims, bool) {
 	c, ok := ctx.Value(claimsKey).(*domaintoken.Claims)
 	return c, ok
-}
-
-// JTIFromContext extrae el JTI del contexto inyectado por JWTMiddleware.
-func JTIFromContext(ctx context.Context) (string, bool) {
-	jti, ok := ctx.Value(jtiKey).(string)
-	return jti, ok
 }
 
 // ── helpers locales ───────────────────────────────────────────────────────────

@@ -25,6 +25,14 @@ type RefreshTokenStore interface {
 	Save(ctx context.Context, t *domaintoken.Token) error
 	FindByJTI(ctx context.Context, jti string) (*domaintoken.Token, error)
 	Revoke(ctx context.Context, jti string) error
+	RevokeByAccessJTI(ctx context.Context, accessJTI string) error
+}
+
+// Denylist is the access-token revocation list shared by every service.
+// Satisfied by revocation.Denylist (NATS KV).
+type Denylist interface {
+	Revoke(ctx context.Context, jti string, exp time.Time) error
+	IsRevoked(jti string) bool
 }
 
 // Service implements domain/token.Service using HS256 JWT.
@@ -34,15 +42,17 @@ type Service struct {
 	accessTokenTTL  time.Duration
 	refreshTokenTTL time.Duration
 	store           RefreshTokenStore
+	denylist        Denylist
 }
 
 // New creates the JWT service.
-func New(secret string, accessTTL, refreshTTL time.Duration, store RefreshTokenStore) *Service {
+func New(secret string, accessTTL, refreshTTL time.Duration, store RefreshTokenStore, denylist Denylist) *Service {
 	return &Service{
 		secret:          []byte(secret),
 		accessTokenTTL:  accessTTL,
 		refreshTokenTTL: refreshTTL,
 		store:           store,
+		denylist:        denylist,
 	}
 }
 
@@ -61,7 +71,7 @@ func (s *Service) GeneratePair(ctx context.Context, userID uuid.UUID, role strin
 	}
 
 	// Persist the refresh token record for rotation/revocation tracking.
-	rt := domaintoken.NewRefresh(userID, refreshJTI, s.refreshTokenTTL)
+	rt := domaintoken.NewRefresh(userID, refreshJTI, accessJTI, s.refreshTokenTTL)
 	if err := s.store.Save(ctx, rt); err != nil {
 		return nil, fmt.Errorf("jwt.GeneratePair: persist refresh token: %w", err)
 	}
@@ -73,7 +83,8 @@ func (s *Service) GeneratePair(ctx context.Context, userID uuid.UUID, role strin
 }
 
 // Validate parses and verifies an access token, returning its claims.
-// Access tokens are stateless — no DB lookup needed.
+// Access tokens are stateless — no DB lookup; revocation is checked against
+// the in-memory denylist.
 func (s *Service) Validate(_ context.Context, accessToken string) (*domaintoken.Claims, error) {
 	claims, err := s.parse(accessToken)
 	if err != nil {
@@ -82,16 +93,24 @@ func (s *Service) Validate(_ context.Context, accessToken string) (*domaintoken.
 	if claims.Kind != string(domaintoken.KindAccess) {
 		return nil, domaintoken.ErrTokenInvalid
 	}
+	if s.denylist.IsRevoked(claims.ID) {
+		return nil, domaintoken.ErrTokenRevoked
+	}
 
 	sub, err := uuid.Parse(claims.Subject)
 	if err != nil {
 		return nil, domaintoken.ErrTokenInvalid
 	}
 
+	var exp time.Time
+	if claims.ExpiresAt != nil {
+		exp = claims.ExpiresAt.Time
+	}
 	return &domaintoken.Claims{
-		Sub:  sub,
-		Role: claims.Role,
-		JTI:  claims.ID,
+		Sub:       sub,
+		Role:      claims.Role,
+		JTI:       claims.ID,
+		ExpiresAt: exp,
 	}, nil
 }
 
@@ -127,17 +146,17 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string) (*domaintoke
 	return s.GeneratePair(ctx, sub, claims.Role)
 }
 
-// Revoke marks an access token's JTI as invalid.
-// For access tokens we store the JTI in the refresh_tokens table with a
-// short TTL matching the access token — this is the simplest revocation
-// strategy without Redis. Swap for a Redis SET in production.
-func (s *Service) Revoke(ctx context.Context, jti string) error {
-	if err := s.store.Revoke(ctx, jti); err != nil {
-		// If not found it may be a first-party access token JTI — not an error.
-		if errors.Is(err, domaintoken.ErrTokenInvalid) {
-			return nil
-		}
-		return fmt.Errorf("jwt.Revoke: %w", err)
+// Revoke ends the session of an access token:
+//  1. revokes the refresh token of the same pair, so it can't mint new tokens;
+//  2. denylists the access token until it expires, so no service accepts it.
+//
+// Both steps are idempotent: logging out twice is safe.
+func (s *Service) Revoke(ctx context.Context, accessJTI string, expiresAt time.Time) error {
+	if err := s.store.RevokeByAccessJTI(ctx, accessJTI); err != nil {
+		return fmt.Errorf("jwt.Revoke: refresh token: %w", err)
+	}
+	if err := s.denylist.Revoke(ctx, accessJTI, expiresAt); err != nil {
+		return fmt.Errorf("jwt.Revoke: access token: %w", err)
 	}
 	return nil
 }

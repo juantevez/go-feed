@@ -26,7 +26,13 @@ const claimsKey contextKey = "jwt_claims"
 
 // JWTMiddleware valida el access token con la misma clave que auth-service.
 // El content-service solo verifica — nunca genera tokens.
-func JWTMiddleware(secret string) func(http.Handler) http.Handler {
+// RevocationChecker consulta la lista de access tokens revocados por logout
+// (revocation.Denylist, compartida vía NATS KV con auth-service).
+type RevocationChecker interface {
+	IsRevoked(jti string) bool
+}
+
+func JWTMiddleware(secret string, revoked RevocationChecker) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			raw := r.Header.Get("Authorization")
@@ -44,6 +50,11 @@ func JWTMiddleware(secret string) func(http.Handler) http.Handler {
 				default:
 					respondError(w, http.StatusUnauthorized, "invalid token")
 				}
+				return
+			}
+
+			if revoked.IsRevoked(claims.JTI) {
+				respondError(w, http.StatusUnauthorized, "token revoked")
 				return
 			}
 

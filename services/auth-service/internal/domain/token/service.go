@@ -2,6 +2,7 @@ package token
 
 import (
 	"context"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -15,8 +16,9 @@ type Service interface {
 	// Refresh validates the refresh token and rotates both tokens.
 	Refresh(ctx context.Context, refreshToken string) (*Pair, error)
 
-	// Revoke marks the token identified by jti as revoked.
-	Revoke(ctx context.Context, jti string) error
+	// Revoke ends the session of an access token: revokes the refresh token of
+	// its pair and denylists the access token (by jti) until it expires.
+	Revoke(ctx context.Context, accessJTI string, expiresAt time.Time) error
 
 	// Validate parses and verifies the access token, returning its claims.
 	Validate(ctx context.Context, accessToken string) (*Claims, error)
@@ -30,7 +32,8 @@ type Pair struct {
 
 // Claims are the verified data extracted from a valid access token.
 type Claims struct {
-	Sub  uuid.UUID
-	Role string
-	JTI  string
+	Sub       uuid.UUID
+	Role      string
+	JTI       string
+	ExpiresAt time.Time
 }

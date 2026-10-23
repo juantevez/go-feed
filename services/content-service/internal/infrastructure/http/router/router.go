@@ -10,7 +10,7 @@ import (
 	contentmw "github.com/juantevez/my-ig/content-service/internal/infrastructure/http/middleware"
 )
 
-func New(posts *handler.PostHandler, jwtSecret string) http.Handler {
+func New(posts *handler.PostHandler, jwtSecret string, revoked contentmw.RevocationChecker) http.Handler {
 	r := chi.NewRouter()
 
 	r.Use(cors.Handler(cors.Options{
@@ -37,7 +37,7 @@ func New(posts *handler.PostHandler, jwtSecret string) http.Handler {
 
 	// Rutas protegidas — requieren JWT válido de auth-service
 	r.Group(func(r chi.Router) {
-		r.Use(contentmw.JWTMiddleware(jwtSecret))
+		r.Use(contentmw.JWTMiddleware(jwtSecret, revoked))
 		r.Post("/posts", posts.CreatePost)
 		r.Get("/users/{id}/posts", posts.ListUserPosts)
 		r.Delete("/posts/{id}", posts.DeletePost)

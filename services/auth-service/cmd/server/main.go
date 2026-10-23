@@ -20,6 +20,7 @@ import (
 	jwtadapter "github.com/juantevez/my-ig/auth-service/internal/infrastructure/jwt"
 	"github.com/juantevez/my-ig/auth-service/internal/infrastructure/persistence/postgres"
 	"github.com/juantevez/my-ig/shared/outbox"
+	"github.com/juantevez/my-ig/shared/revocation"
 )
 
 func main() {
@@ -59,11 +60,18 @@ func main() {
 	refreshTokenRepo := postgres.NewRefreshTokenRepository(db)
 	txManager := outbox.NewTxManager(db)
 	publisher := outbox.NewPublisher("auth-service") // escribe en la tabla outbox, no en NATS
+	denylist, err := revocation.New(js)
+	if err != nil {
+		slog.Error("revocation denylist error", "err", err)
+		os.Exit(1)
+	}
+	defer denylist.Stop()
 	tokenSvc := jwtadapter.New(
 		cfg.JWT.Secret,
 		cfg.JWT.AccessTokenTTL,
 		cfg.JWT.RefreshTokenTTL,
 		refreshTokenRepo,
+		denylist,
 	)
 
 	// ── Outbox relay (outbox → JetStream) ────────────────────────────────────

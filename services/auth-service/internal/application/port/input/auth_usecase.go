@@ -2,6 +2,7 @@ package input
 
 import (
 	"context"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -44,7 +45,8 @@ type RefreshResult struct {
 // --- Logout ---
 
 type LogoutCommand struct {
-	JTI string // JTI of the access token being invalidated
+	JTI       string    // JTI of the access token being invalidated
+	ExpiresAt time.Time // its exp: how long it must stay denylisted
 }
 
 // AuthUseCase is the primary (driving) port.

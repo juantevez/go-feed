@@ -119,9 +119,10 @@ func (s *AuthService) Refresh(ctx context.Context, cmd input.RefreshCommand) (*i
 	}, nil
 }
 
-// Logout revokes the access token identified by its JTI.
+// Logout ends the session: revokes the refresh token of the pair and
+// denylists the access token in every service until it expires.
 func (s *AuthService) Logout(ctx context.Context, cmd input.LogoutCommand) error {
-	if err := s.tokens.Revoke(ctx, cmd.JTI); err != nil {
+	if err := s.tokens.Revoke(ctx, cmd.JTI, cmd.ExpiresAt); err != nil {
 		return fmt.Errorf("logout: revoke token: %w", err)
 	}
 	return nil
