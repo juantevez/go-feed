@@ -9,9 +9,11 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/juantevez/my-ig/feed-service/internal/domain/feed"
+	"github.com/juantevez/my-ig/shared/outbox"
 )
 
 // FeedRepository implementa feed.Repository sobre Postgres.
+// Usa la tx del context si existe (outbox.Conn), así participa de TxManager.WithinTx.
 type FeedRepository struct {
 	db *pgxpool.Pool
 }
@@ -57,7 +59,7 @@ func (r *FeedRepository) GetPage(ctx context.Context, userID uuid.UUID, cursor *
 			WHERE user_id = $1
 			ORDER BY score DESC, post_id DESC
 			LIMIT $2`
-		rows, err = r.db.Query(ctx, q, userID, limit)
+		rows, err = outbox.Conn(ctx, r.db).Query(ctx, q, userID, limit)
 	} else {
 		// Páginas siguientes — cursor compuesto (score, post_id)
 		const q = `
@@ -67,7 +69,7 @@ func (r *FeedRepository) GetPage(ctx context.Context, userID uuid.UUID, cursor *
 			  AND (score, post_id::text) < ($2, $3)
 			ORDER BY score DESC, post_id DESC
 			LIMIT $4`
-		rows, err = r.db.Query(ctx, q, userID, cursor.Score, cursor.PostID.String(), limit)
+		rows, err = outbox.Conn(ctx, r.db).Query(ctx, q, userID, cursor.Score, cursor.PostID.String(), limit)
 	}
 
 	if err != nil {
@@ -94,7 +96,7 @@ func (r *FeedRepository) GetPage(ctx context.Context, userID uuid.UUID, cursor *
 // Llamado cuando un post es borrado (invalidación).
 func (r *FeedRepository) DeleteByPostID(ctx context.Context, postID uuid.UUID) error {
 	const q = `DELETE FROM feed_entries WHERE post_id = $1`
-	if _, err := r.db.Exec(ctx, q, postID); err != nil {
+	if _, err := outbox.Conn(ctx, r.db).Exec(ctx, q, postID); err != nil {
 		return fmt.Errorf("feed_repo.DeleteByPostID: %w", err)
 	}
 	return nil
@@ -104,7 +106,7 @@ func (r *FeedRepository) DeleteByPostID(ctx context.Context, postID uuid.UUID) e
 // Llamado en unfollow.
 func (r *FeedRepository) DeleteByAuthorFromUser(ctx context.Context, userID, authorID uuid.UUID) error {
 	const q = `DELETE FROM feed_entries WHERE user_id = $1 AND author_id = $2`
-	if _, err := r.db.Exec(ctx, q, userID, authorID); err != nil {
+	if _, err := outbox.Conn(ctx, r.db).Exec(ctx, q, userID, authorID); err != nil {
 		return fmt.Errorf("feed_repo.DeleteByAuthorFromUser: %w", err)
 	}
 	return nil
@@ -113,6 +115,7 @@ func (r *FeedRepository) DeleteByAuthorFromUser(ctx context.Context, userID, aut
 // ── FollowerRepository ────────────────────────────────────────────────────────
 
 // FollowerRepository implementa feed.FollowerRepository.
+// Usa la tx del context si existe (outbox.Conn), así participa de TxManager.WithinTx.
 // El feed-service lee el grafo social de su propia DB (replicado desde social-service).
 // En fase 1 la tabla followers es poblada directamente desde auth-service via evento.
 type FollowerRepository struct {
@@ -133,7 +136,7 @@ func (r *FollowerRepository) SaveFollower(ctx context.Context, followerID, follo
 		ON CONFLICT (follower_id, following_id) DO UPDATE
 		SET active = TRUE, state_at = EXCLUDED.state_at, last_seen_at = NOW()
 		WHERE followers.state_at < EXCLUDED.state_at`
-	tag, err := r.db.Exec(ctx, q, followerID, followingID, at)
+	tag, err := outbox.Conn(ctx, r.db).Exec(ctx, q, followerID, followingID, at)
 	if err != nil {
 		return false, fmt.Errorf("follower_repo.SaveFollower: %w", err)
 	}
@@ -151,7 +154,7 @@ func (r *FollowerRepository) MarkUnfollowed(ctx context.Context, followerID, fol
 		ON CONFLICT (follower_id, following_id) DO UPDATE
 		SET active = FALSE, state_at = EXCLUDED.state_at
 		WHERE followers.state_at < EXCLUDED.state_at`
-	tag, err := r.db.Exec(ctx, q, followerID, followingID, at)
+	tag, err := outbox.Conn(ctx, r.db).Exec(ctx, q, followerID, followingID, at)
 	if err != nil {
 		return false, fmt.Errorf("follower_repo.MarkUnfollowed: %w", err)
 	}
@@ -171,7 +174,7 @@ func (r *FollowerRepository) GetActiveFollowers(ctx context.Context, authorID uu
 		ORDER BY follower_id
 		LIMIT 10000`
 
-	rows, err := r.db.Query(ctx, q, authorID)
+	rows, err := outbox.Conn(ctx, r.db).Query(ctx, q, authorID)
 	if err != nil {
 		return nil, fmt.Errorf("follower_repo.GetActiveFollowers: %w", err)
 	}

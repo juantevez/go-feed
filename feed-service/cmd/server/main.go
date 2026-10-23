@@ -20,6 +20,7 @@ import (
 	"github.com/juantevez/my-ig/feed-service/internal/infrastructure/http/router"
 	natsconsumer "github.com/juantevez/my-ig/feed-service/internal/infrastructure/messaging/natsconsumer"
 	"github.com/juantevez/my-ig/feed-service/internal/infrastructure/persistence/postgres"
+	"github.com/juantevez/my-ig/shared/outbox"
 )
 
 func main() {
@@ -65,7 +66,7 @@ func main() {
 	}
 
 	// ── NATS consumer ────────────────────────────────────────────────────────
-	consumer := natsconsumer.NewConsumer(js, fanOutSvc, feedRepo, followerRepo)
+	consumer := natsconsumer.NewConsumer(js, outbox.NewTxManager(db), fanOutSvc, feedRepo, followerRepo)
 	if err := consumer.Subscribe(); err != nil {
 		slog.Error("consumer subscribe error", "err", err)
 		os.Exit(1)

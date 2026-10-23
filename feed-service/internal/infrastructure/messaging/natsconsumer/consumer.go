@@ -19,14 +19,21 @@ import (
 // a los use cases correspondientes.
 type Consumer struct {
 	js           nats.JetStreamContext
+	tx           txRunner
 	fanOut       input.FanOutUseCase
 	feedRepo     feedDeleter
 	followerRepo followerWriter
 }
 
+// txRunner ejecuta fn dentro de una transacción (outbox.TxManager).
+type txRunner interface {
+	WithinTx(ctx context.Context, fn func(ctx context.Context) error) error
+}
+
 // feedDeleter es la interfaz mínima que el consumer necesita para invalidación.
 type feedDeleter interface {
 	DeleteByPostID(ctx context.Context, postID uuid.UUID) error
+	DeleteByAuthorFromUser(ctx context.Context, userID, authorID uuid.UUID) error
 }
 
 // followerWriter sincroniza el grafo social en la DB local del feed-service.
@@ -38,8 +45,8 @@ type followerWriter interface {
 	MarkUnfollowed(ctx context.Context, followerID, followingID uuid.UUID, at time.Time) (bool, error)
 }
 
-func NewConsumer(js nats.JetStreamContext, fanOut input.FanOutUseCase, feedRepo feedDeleter, followerRepo followerWriter) *Consumer {
-	return &Consumer{js: js, fanOut: fanOut, feedRepo: feedRepo, followerRepo: followerRepo}
+func NewConsumer(js nats.JetStreamContext, tx txRunner, fanOut input.FanOutUseCase, feedRepo feedDeleter, followerRepo followerWriter) *Consumer {
+	return &Consumer{js: js, tx: tx, fanOut: fanOut, feedRepo: feedRepo, followerRepo: followerRepo}
 }
 
 // Subscribe registra todos los consumers JetStream del feed-service.
@@ -162,15 +169,27 @@ func (c *Consumer) handleUserUnfollowed(ctx context.Context, msg *nats.Msg) erro
 
 	slog.Info("consumer: removing follower", "follower_id", p.FollowerID, "following_id", p.FollowingID)
 
-	applied, err := c.followerRepo.MarkUnfollowed(ctx, p.FollowerID, p.FollowingID, p.UnfollowedAt)
-	if err != nil {
-		return fmt.Errorf("mark unfollowed: %w", err)
-	}
-	if !applied {
-		slog.Info("consumer: stale unfollow event ignored", "event_id", envelope.EventID,
-			"follower_id", p.FollowerID, "following_id", p.FollowingID)
-	}
-	return nil
+	// Tombstone + limpieza del feed en la misma tx: si el borrado fallara después
+	// de aplicar el tombstone, el reintento vería el evento como stale y nunca
+	// limpiaría el feed.
+	return c.tx.WithinTx(ctx, func(ctx context.Context) error {
+		applied, err := c.followerRepo.MarkUnfollowed(ctx, p.FollowerID, p.FollowingID, p.UnfollowedAt)
+		if err != nil {
+			return fmt.Errorf("mark unfollowed: %w", err)
+		}
+		if !applied {
+			// Hay un follow más nuevo: sus posts deben quedar en el feed.
+			slog.Info("consumer: stale unfollow event ignored", "event_id", envelope.EventID,
+				"follower_id", p.FollowerID, "following_id", p.FollowingID)
+			return nil
+		}
+
+		// Sacar del feed del follower los posts del autor que dejó de seguir.
+		if err := c.feedRepo.DeleteByAuthorFromUser(ctx, p.FollowerID, p.FollowingID); err != nil {
+			return fmt.Errorf("delete feed entries of unfollowed author: %w", err)
+		}
+		return nil
+	})
 }
 
 // ── helpers de extracción de payload ─────────────────────────────────────────
