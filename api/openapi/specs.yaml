@@ -152,7 +152,10 @@ paths:
                     format: binary
                   minItems: 1
                   maxItems: 10
-                  description: Archivos de imagen o video (límite total 50 MB)
+                  description: |
+                    Archivos de imagen (jpeg, png, webp, hasta 8 MB cada uno) o video (mp4, webm,
+                    hasta 50 MB cada uno). El tipo se detecta por contenido; el Content-Type
+                    declarado se ignora. El body completo no puede superar 100 MB.
       responses:
         '201':
           description: Post creado y publicado en NATS
@@ -162,6 +165,12 @@ paths:
                 $ref: '#/components/schemas/PostResponse'
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '413':
+          description: El body supera 100 MB o un archivo supera su límite (8 MB imagen, 50 MB video)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
       security:
         - BearerAuth: []
 
@@ -169,6 +178,9 @@ paths:
     get:
       tags: [Content]
       summary: Obtener post por ID (endpoint público)
+      description: |
+        Sin token devuelve solo posts publicados y públicos. Con el token del autor
+        devuelve también sus posts `followers_only` y `private`. Un token inválido da 401.
       operationId: getPost
       servers:
         - url: http://localhost:8082
@@ -185,8 +197,11 @@ paths:
               schema:
                 $ref: '#/components/schemas/PostResponse'
         '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
-      security: []
+      security:
+        - {}
+        - BearerAuth: []
 
     delete:
       tags: [Content]
@@ -459,9 +474,11 @@ components:
           enum: [public, followers_only, private]
         media_urls:
           type: array
+          description: |
+            En posts públicos, rutas relativas a S3_BASE_URL. En posts no públicos (solo
+            visibles para el autor), URLs prefirmadas absolutas válidas por 1 hora.
           items:
             type: string
-            format: uri
         tags:
           type: array
           items:
