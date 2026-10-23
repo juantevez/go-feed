@@ -441,11 +441,11 @@ paths:
           schema: { type: string, format: uuid }
       responses:
         '204':
-          description: Marcada como leída
+          description: Marcada como leída (también si ya lo estaba)
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404':
-          description: No existe, no es del usuario o ya estaba leída
+          description: No existe o no es del usuario
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
@@ -480,6 +480,10 @@ paths:
         clientes. No se acepta por query string. El servidor manda un mensaje JSON por
         cada notificación nueva (`type`, `id`, `payload`, `created_at`); el cliente no
         manda nada.
+
+        El servidor cierra la conexión cuando vence el token (código `4001`, refrescar y
+        reconectar), cuando se hace logout con él (`4003`, no reconectar) o si el
+        cliente no lee y se llena su buffer (`1013`).
       parameters:
         - name: Sec-WebSocket-Protocol
           in: header

@@ -1,7 +1,7 @@
 # notification-service
 
 Bounded context de **notificaciones**: genera avisos para un usuario a partir de eventos del
-sistema (hoy, que alguien lo empezó a seguir), los guarda, los empuja en tiempo real por
+sistema (hoy, que alguien lo empezó a seguir; y la borra si lo deja de seguir), los guarda, los empuja en tiempo real por
 WebSocket a quien esté conectado y los sirve por HTTP para leerlos y marcarlos como leídos.
 
 | | |
@@ -11,7 +11,7 @@ WebSocket a quien esté conectado y los sirve por HTTP para leerlos y marcarlos 
 | Código | [`services/notification-service/`](../../services/notification-service/) |
 | Migraciones | [`deploy/migrations/notification-service/`](../../deploy/migrations/notification-service/) |
 | Eventos que publica | — |
-| Eventos que consume | `users.followed.v1`, `posts.created.v1` (este último solo se loguea) |
+| Eventos que consume | `users.followed.v1`, `users.unfollowed.v1`, `posts.created.v1` (este último solo se loguea) |
 
 ---
 
@@ -40,15 +40,15 @@ flowchart LR
         HUB["Hub WebSocket<br/>en memoria"]
     end
 
-    PG[("postgres-notification<br/>notifications")]
+    PG[("postgres-notification<br/>notifications, follow_states")]
 
-    SS -->|users.followed.v1| USERS
+    SS -->|users.followed.v1, users.unfollowed.v1| USERS
     CS -->|posts.created.v1| POSTS
     A -->|logout escribe el jti| KV
     USERS --> K
     POSTS --> K
     K -->|tras 3 fallas| DLQ
-    K -->|INSERT, dedupe por evento| PG
+    K -->|INSERT o DELETE, en una tx| PG
     K -->|push| HUB
     HUB -.->|mensaje JSON| C
     C -->|GET y PATCH /notifications| H
@@ -77,16 +77,17 @@ services/notification-service/
 └── internal/
     ├── domain/notification/
     │   ├── notification.go                     # Notification, Type, errores
-    │   └── repository.go                       # puerto notification.Repository
+    │   └── repository.go                       # puertos notification.Repository, FollowStateRepository
     ├── application/
     │   ├── port/input/  notification_usecase.go  # puerto driving: listar, marcar leídas
     │   ├── port/output/ pusher.go              # puerto driven: NotificationPusher
+    │   │                tx_manager.go          # puerto driven: TxManager
     │   │                event_publisher.go     # puerto driven: EventPublisher (sin uso)
-    │   └── usecase/     notification_service.go  # casos de uso + CreateAndPush
+    │   └── usecase/     notification_service.go  # listar/marcar + NotifyNewFollower, RemoveNewFollower
     └── infrastructure/
         ├── http/        handler/ router/ middleware/   # adaptador HTTP (chi) + JWTMiddleware
-        ├── messaging/nats/consumer.go          # adaptador driving: eventos → CreateAndPush
-        ├── persistence/postgres/               # NotificationRepository
+        ├── messaging/nats/consumer.go          # adaptador driving: eventos → casos de uso
+        ├── persistence/postgres/               # NotificationRepository, FollowStateRepository
         └── ws/hub.go                           # adaptador NotificationPusher (gorilla/websocket)
 ```
 
@@ -94,6 +95,7 @@ Dependencias de `shared/`:
 - `shared/events`: `Envelope`, tópicos y payloads que consume.
 - `shared/dlq`: suscripción durable con reintentos, backoff, aviso de "en proceso" y DLQ (ver
   [FEED.md](FEED.md#reintentos-y-dlq), es la misma política).
+- `shared/outbox`: solo `TxManager` y `Conn` para las transacciones (no publica eventos).
 - `shared/revocation`: `Denylist`, la lista de access tokens revocados por logout.
 
 ---
@@ -116,9 +118,29 @@ Dependencias de `shared/`:
 
 JetStream entrega at-least-once, así que el mismo evento puede llegar más de una vez. La tabla
 tiene un índice único parcial sobre `(event_id, target_user_id)`: un evento genera como mucho
-una notificación por destinatario, y una reentrega no duplica ni vuelve a pushear
-(`CreateAndPush` solo pushea si el `INSERT` creó la fila). Incluye `target_user_id` porque un
-mismo evento puede notificar a varios usuarios (pensado para `posts.created`).
+una notificación por destinatario, y una reentrega no duplica ni vuelve a pushear (solo se
+pushea si el `INSERT` creó la fila). Incluye `target_user_id` porque un mismo evento puede
+notificar a varios usuarios (pensado para `posts.created`).
+
+### Una notificación de seguidor por persona
+
+Hay **como mucho una** notificación `new_follower` por par seguidor/seguido:
+
+- **Dejar de seguir la borra.** Es el comportamiento de Instagram: "X te siguió" desaparece si X
+  deja de seguirte.
+- **Volver a seguir notifica de nuevo** (con push), reemplazando la anterior si quedaba.
+
+`users.followed` y `users.unfollowed` llegan por suscripciones separadas y pueden procesarse en
+cualquier orden. Para que el resultado no dependa de eso, la tabla `follow_states` guarda el
+último estado de cada relación con **last-write-wins** por timestamp del evento (igual que el
+grafo de feed-service): un evento solo se aplica si es más nuevo que el último aplicado.
+
+| Orden de procesamiento | Resultado |
+|---|---|
+| follow, después unfollow | El unfollow borra la notificación. |
+| unfollow, después su follow (más viejo) | El follow está viejo: no se crea nada. |
+| follow, unfollow, follow | Queda una notificación, la del último follow. |
+| Reentrega de un evento ya aplicado | No hace nada (mismo timestamp: no es más nuevo). |
 
 ---
 
@@ -143,7 +165,7 @@ Los endpoints con Bearer responden `401` con `missing authorization header`, `in
 ### `GET /notifications?limit=20&offset=0&unread=true`
 
 - `limit`: default 20, máximo 100. Un valor no numérico o `≤ 0` usa el default.
-- `offset`: default 0. Paginación por offset.
+- `offset`: default 0. Paginación por offset. Un valor negativo se toma como 0.
 - `unread=true`: solo las no leídas. Cualquier otro valor, todas.
 - Orden: más recientes primero.
 
@@ -170,17 +192,18 @@ así que el número del badge no depende de `limit` ni de `unread`.
 |---|---|
 | `200` | Lista, posiblemente vacía. |
 | `401` | Token ausente o inválido. |
-| `500` | Error inesperado, **y también** un `offset` negativo (ver [limitaciones](#limitaciones-conocidas)). |
+| `500` | Error inesperado. |
 
 ### `PATCH /notifications/{id}/read`
 
 | Status | Cuándo |
 |---|---|
-| `204` | Marcada como leída. |
+| `204` | Marcada como leída, **también si ya lo estaba** (idempotente). |
 | `400` | `id` no es un UUID. |
-| `404` | No existe, es de otro usuario, **o ya estaba leída**. |
+| `404` | No existe o es de otro usuario. |
 
-Una notificación de otro usuario da `404`, no `403`: no revela que el ID existe.
+Una notificación de otro usuario da `404`, no `403`: no revela que el ID existe. Marcar una ya
+leída no cambia su `read_at`.
 
 ### `PATCH /notifications/read-all`
 
@@ -214,8 +237,29 @@ ws.onmessage = (e) => mostrar(JSON.parse(e.data));
 | `101` | Conexión establecida. |
 | `401` | Sin token (`missing access token`), o token inválido, expirado o revocado. |
 
-El token se valida **solo en el upgrade**: una conexión abierta sigue abierta aunque el token
-expire o se haga logout (ver [limitaciones](#limitaciones-conocidas)).
+El token se valida en el upgrade, pero **la conexión no lo sobrevive**: se cierra sola cuando
+el token vence o cuando se hace logout con él. El código de cierre le dice al cliente qué hacer:
+
+| Código | Motivo | Qué hace el cliente |
+|---|---|---|
+| `4001` | `token expired`: venció el access token con el que se abrió. | Refrescar el token (`POST /auth/refresh`) y reconectar. |
+| `4003` | `token revoked`: se hizo logout con ese token. | No reconectar. |
+| `1013` | `slow client`: se llenó el buffer de la conexión. | Reconectar y pedir `GET /notifications`. |
+| `1000` | Cierre normal. | — |
+
+```js
+ws.onclose = (e) => {
+  if (e.code === 4001) refrescarYReconectar();
+  else if (e.code !== 4003) reconectarConBackoff();
+};
+```
+
+- **Logout:** auth-service escribe el `jti` en la lista de revocados (KV de NATS). La copia en
+  memoria de notification-service lo recibe por `Watch` y avisa al `Hub`
+  (`Denylist.OnRevoke` → `Hub.RevokeToken`), que cierra las conexiones abiertas con ese token.
+  Medido: la conexión se cierra a los ~6 ms del logout. Las otras sesiones del mismo usuario
+  (otros logins) siguen abiertas, igual que en la API HTTP.
+- **Vencimiento:** cada conexión tiene un timer al `exp` del token.
 
 - Un usuario puede tener **varias conexiones** (pestañas, dispositivos); cada notificación va a
   todas.
@@ -229,7 +273,7 @@ expire o se haga logout (ver [limitaciones](#limitaciones-conocidas)).
 - **Keepalive:** el servidor manda un ping cada 54 s y corta si no recibe pong en 60 s. Los
   navegadores responden los pings solos.
 - Cada conexión tiene un buffer de 64 mensajes. Si se llena (cliente que no lee o conexión
-  muy lenta), el servidor cierra **esa** conexión; el resto sigue igual. El cliente tiene que
+  muy lenta), el servidor cierra **esa** conexión con `1013`; el resto sigue igual. El cliente tiene que
   reconectar y pedir `GET /notifications` para recuperar lo que se perdió.
 
 #### Ciclo de vida de una conexión
@@ -240,6 +284,10 @@ sola vez (`sync.Once`); el canal de mensajes `send` no se cierra nunca. Así, qu
 lento) y `readPump` (desconexión) llamen los dos a `remove` para la misma conexión, o que un
 `Push` coincida con una desconexión, no rompe nada. `Push` además recorre una copia de la lista
 de conexiones tomada bajo lock.
+
+Los cierres iniciados por el servidor (cliente lento, token vencido, token revocado) pasan
+todos por `remove`, que guarda el código y el motivo antes de cerrar `done`; el primero gana. El
+timer de vencimiento se detiene al cerrar la conexión por cualquier otra causa.
 
 ---
 
@@ -259,22 +307,36 @@ sequenceDiagram
     SS->>JS: users.followed.v1
     JS->>K: entrega, durable notification-service-user-followed
     K->>K: notification.New, target = seguido, source = seguidor
-    K->>DB: INSERT ON CONFLICT event_id, target_user_id DO NOTHING
-    alt fila creada
+    K->>DB: BEGIN
+    K->>DB: UPSERT follow_states active=TRUE si followed_at es mas nuevo
+    alt evento aplicado
+        K->>DB: DELETE new_follower anterior del mismo seguidor
+        K->>DB: INSERT notifications ON CONFLICT event_id, target_user_id DO NOTHING
+    else evento viejo o reentrega
+        Note over K: no se toca nada
+    end
+    K->>DB: COMMIT
+    opt fila creada
         K--)HUB: Push en una goroutine
         HUB--)C: mensaje JSON a cada conexion del usuario
-    else reentrega del evento
-        Note over K: ya existia, no se pushea de nuevo
     end
     K-->>JS: Ack
 ```
 
-- **El push no bloquea el ack:** corre en una goroutine aparte, después de guardar. Si el
+- **El push no bloquea el ack:** corre en una goroutine aparte, después del commit. Si el
   usuario no está conectado, no pasa nada; si falla, la notificación igual está en la DB.
 - **El orden de los pushes no está garantizado** cuando llegan varias notificaciones juntas
   (una goroutine por cada una). El cliente puede ordenar por `created_at`.
 - Un evento con seguidor y seguido iguales falla en `notification.New` y va directo a la DLQ
   (`dlq.Permanent`).
+
+### Dejar de seguir
+
+`users.unfollowed.v1` (durable `notification-service-user-unfollowed`), en una transacción:
+registra el unfollow en `follow_states` si es más nuevo que el último evento de la relación y,
+si se aplicó, borra la notificación `new_follower` de ese seguidor. No hay push: la
+notificación simplemente deja de aparecer en `GET /notifications`. Si el usuario ya la había
+visto en tiempo real, el cliente la sigue mostrando hasta que recargue la lista.
 
 ### `posts.created.v1`
 
@@ -295,8 +357,8 @@ sequenceDiagram
     H->>DB: SELECT COUNT no leidas
     H-->>C: notifications, unread_count
     C->>H: PATCH /notifications/id/read
-    H->>DB: UPDATE ... WHERE id AND target_user_id AND read = FALSE
-    H-->>C: 204, o 404 si no actualizo ninguna fila
+    H->>DB: UPDATE SET read = TRUE, read_at = COALESCE read_at ... WHERE id AND target_user_id
+    H-->>C: 204, o 404 si no matcheo ninguna fila
 ```
 
 ---
@@ -306,6 +368,7 @@ sequenceDiagram
 | Tabla | Uso |
 |---|---|
 | `notifications` | Una fila por notificación. `payload` es `JSONB`. `event_id` nullable. |
+| `follow_states` | Último estado de cada relación seguidor → seguido (`active`, `state_at`), para last-write-wins. PK `(follower_id, following_id)`. |
 
 Índices:
 
@@ -314,8 +377,10 @@ sequenceDiagram
 | `(target_user_id, created_at DESC)` | Listado del usuario. |
 | `(target_user_id, read) WHERE read = FALSE` | Conteo y listado de no leídas. |
 | `UNIQUE (event_id, target_user_id) WHERE event_id IS NOT NULL` | Idempotencia ante reentregas. |
+| `(target_user_id, source_user_id, type)` | Borrar la notificación de un seguidor puntual. |
 
-El repositorio usa el pool directamente: ninguna operación necesita transacción.
+Los repositorios usan `outbox.Conn(ctx, pool)`: si hay una transacción en el `ctx` la usan, si
+no, el pool. Follow y unfollow corren en una transacción; las lecturas y el marcado, no.
 
 Migraciones (golang-migrate, las corre el contenedor `migrate-notification` al levantar el
 stack):
@@ -324,6 +389,7 @@ stack):
 |---|---|
 | `0001` | `notifications` e índices de listado |
 | `0002` | `event_id` + índice único de idempotencia |
+| `0003` | `follow_states` + índice `(target_user_id, source_user_id, type)` |
 
 ---
 
@@ -333,15 +399,17 @@ notification-service **no publica eventos**. Consume:
 
 | Tópico | Stream | Durable | Qué hace |
 |---|---|---|---|
-| `users.followed.v1` | `USERS` | `notification-service-user-followed` | Notificación `new_follower` para el seguido. |
+| `users.followed.v1` | `USERS` | `notification-service-user-followed` | Notificación `new_follower` para el seguido (reemplaza la anterior del mismo seguidor). |
+| `users.unfollowed.v1` | `USERS` | `notification-service-user-unfollowed` | Borra la notificación `new_follower` de ese seguidor. |
 | `posts.created.v1` | `POSTS` | `notification-service-post-created` | Solo loguea. |
 
 Reintentos y DLQ: la misma política de `shared/dlq` que feed-service (3 entregas con backoff de
 1 s y 5 s, payload inválido directo a la DLQ, aviso de "en proceso" cada 10 s), descripta en
 [FEED.md](FEED.md#reintentos-y-dlq).
 
-Al arrancar crea solo el stream `DLQ`. **No crea `USERS` ni `POSTS`:** los crean content-service
-y feed-service (ver [limitaciones](#limitaciones-conocidas)).
+Al arrancar crea (si no existen) los streams de los que consume, `USERS` y `POSTS`, con la misma
+configuración que content-service y feed-service (disco, retención 7 días), y `DLQ`. Arranca
+aunque sea el primer servicio en conectarse a un NATS vacío.
 
 ---
 
@@ -396,12 +464,17 @@ make dlq-list                               # mensajes en la DLQ (de todos los s
 - **Tests:** con `go test -race`:
   - [`hub_test.go`](../../services/notification-service/internal/infrastructure/ws/hub_test.go):
     un cliente que no lee se desconecta sin panic, pushes concurrentes con conexiones que
-    entran y salen, y un push llega a todas las conexiones del usuario.
+    entran y salen, un push llega a todas las conexiones del usuario, el cierre con `4001` al
+    vencer el token y con `4003` al revocarlo (sin tocar otra sesión del mismo usuario).
   - [`jwt_middleware_test.go`](../../services/notification-service/internal/infrastructure/http/middleware/jwt_middleware_test.go):
     token como subprotocolo (y que el servidor lo selecciona), token en header, y `401` sin
     token, con token inválido o por query string.
 
-  No hay tests de los casos de uso, del consumer ni del repositorio.
+  - [`notification_service_test.go`](../../services/notification-service/internal/application/usecase/notification_service_test.go):
+    follow/unfollow/follow deja una notificación, unfollow procesado antes que su follow,
+    reentrega de un follow, y `offset` negativo.
+
+  No hay tests del consumer ni de los repositorios.
 
 ---
 
@@ -420,7 +493,10 @@ conectaron y restos de código para limpiar.
   procesó el evento. Hace falta un fan-out entre instancias (ej. un subject NATS core por
   usuario).
 - **Retención:** `notifications` crece sin límite.
-- **Tests:** faltan los de casos de uso, consumer y repositorio (ver [Operación](#operación)).
+- **Tests:** faltan los del consumer y los repositorios (ver [Operación](#operación)).
+- **Streams duplicados:** content-service, feed-service y notification-service declaran cada uno
+  los streams que usan. Si la configuración cambia en uno y no en los otros, el primero que
+  arranca define la del stream. Convendría declararlos una sola vez en `shared/`.
 - **`/ready`** responde `200` siempre.
 - **Restos para limpiar:** el puerto `EventPublisher`, el error `ErrNotOwner` y el método de
   dominio `Notification.MarkRead` no se usan (el repositorio marca con SQL); `LOG_LEVEL` no se
@@ -430,28 +506,6 @@ conectaron y restos de código para limpiar.
 
 ## Limitaciones conocidas
 
-Ordenadas por impacto. Las dos primeras están verificadas.
-
-1. **Un `offset` negativo da `500`.** Se pasa tal cual a SQL y Postgres lo rechaza
-   (`OFFSET must not be negative`). content-service lo clampea a 0; este servicio no.
-
-2. **Marcar como leída no es idempotente.** Una notificación ya leída da `404` en
-   `PATCH /notifications/{id}/read`, igual que una que no existe: un cliente que reintenta
-   (o dos pestañas) recibe un error engañoso.
-
-3. **Arranque en un NATS vacío.** notification-service no crea los streams `USERS` ni `POSTS`.
-   Si arranca antes que content-service o feed-service sobre un NATS nuevo, la suscripción
-   falla, el proceso sale y Docker lo reinicia hasta que alguno de ellos los cree. El compose
-   no declara esa dependencia.
-
-4. **Una notificación por cada follow.** Seguir, dejar de seguir y volver a seguir genera una
-   notificación nueva cada vez (cada follow es un evento distinto), y el unfollow no borra la
-   anterior.
-
-5. **Sin CORS.** A diferencia del resto de los servicios, no tiene middleware de CORS: un
-   preflight desde `http://localhost:5173` da `405`. Funciona solo detrás del proxy del front
-   (mismo origen).
-
-6. **El WebSocket no se entera de un logout.** El token se valida solo en el upgrade: si
-   expira o se revoca después, la conexión sigue abierta y recibiendo notificaciones hasta que
-   el cliente la cierre.
+- **Sin CORS.** A diferencia del resto de los servicios, no tiene middleware de CORS: un
+  preflight desde `http://localhost:5173` da `405`. Funciona solo detrás del proxy del front
+  (mismo origen).

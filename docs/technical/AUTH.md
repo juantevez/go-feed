@@ -218,6 +218,10 @@ tiene que llegar a todos. Se resuelve con `shared/revocation`:
   validar un token no agrega ningún viaje por red. Al arrancar, el servicio carga todas las
   revocaciones vigentes antes de aceptar requests: un reinicio no "olvida" un logout.
 - **Propagación:** milisegundos (lo que tarda NATS en notificar el cambio).
+- **Conexiones abiertas:** el chequeo en cada request no alcanza a un WebSocket ya establecido.
+  `Denylist.OnRevoke` avisa de cada revocación nueva, y notification-service lo usa para cerrar
+  en el momento los WebSockets abiertos con ese token (ver
+  [NOTIFICATION.md](NOTIFICATION.md#get-ws)).
 
 ### Validación en los otros servicios
 
