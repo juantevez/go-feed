@@ -3,12 +3,12 @@ package natsconsumer
 import (
 	"context"
 	"encoding/json"
-	"errors"
+	"fmt"
 	"log/slog"
-	"time"
 
 	"github.com/juantevez/my-ig/notification-service/internal/application/usecase"
 	"github.com/juantevez/my-ig/notification-service/internal/domain/notification"
+	"github.com/juantevez/my-ig/shared/dlq"
 	"github.com/juantevez/my-ig/shared/events"
 	"github.com/nats-io/nats.go"
 )
@@ -24,49 +24,40 @@ func NewConsumer(js nats.JetStreamContext, svc *usecase.NotificationService) *Co
 }
 
 // Subscribe registra todos los consumers del notification-service.
+// Reintentos y DLQ los maneja dlq.Subscribe: los handlers solo retornan error.
 func (c *Consumer) Subscribe() error {
-	if err := c.subscribeUserFollowed(); err != nil {
+	if err := dlq.EnsureStream(c.js); err != nil {
 		return err
 	}
-	if err := c.subscribePostCreated(); err != nil {
-		return err
+
+	subs := []struct {
+		topic   string
+		durable string
+		handler dlq.Handler
+	}{
+		{events.TopicUserFollowed, "notification-service-user-followed", c.handleUserFollowed},
+		{events.TopicPostCreated, "notification-service-post-created", c.handlePostCreated},
+	}
+	for _, sub := range subs {
+		if err := dlq.Subscribe(c.js, sub.topic, sub.durable, sub.handler); err != nil {
+			return fmt.Errorf("consumer: %w", err)
+		}
+		slog.Info("consumer: subscribed", "topic", sub.topic)
 	}
 	return nil
 }
 
 // ── users.followed.v1 ─────────────────────────────────────────────────────────
 
-func (c *Consumer) subscribeUserFollowed() error {
-	_, err := c.js.Subscribe(
-		events.TopicUserFollowed,
-		c.handleUserFollowed,
-		nats.Durable("notification-service-user-followed"),
-		nats.AckExplicit(),
-		nats.MaxDeliver(3),
-		nats.AckWait(30*time.Second),
-		nats.DeliverNew(),
-	)
-	if err != nil {
-		return errors.New("consumer: subscribe users.followed.v1: " + err.Error())
-	}
-	slog.Info("consumer: subscribed", "topic", events.TopicUserFollowed)
-	return nil
-}
-
-func (c *Consumer) handleUserFollowed(msg *nats.Msg) {
+func (c *Consumer) handleUserFollowed(ctx context.Context, msg *nats.Msg) error {
 	var envelope events.Envelope
 	if err := json.Unmarshal(msg.Data, &envelope); err != nil {
-		slog.Error("consumer: unmarshal", "topic", events.TopicUserFollowed, "err", err)
-		_ = msg.Term()
-		return
+		return dlq.Permanent(fmt.Errorf("unmarshal envelope: %w", err))
 	}
 
-	raw, _ := json.Marshal(envelope.Payload)
 	var p events.UserFollowedPayload
-	if err := json.Unmarshal(raw, &p); err != nil {
-		slog.Error("consumer: extract payload", "event_id", envelope.EventID, "err", err)
-		_ = msg.Term()
-		return
+	if err := decodePayload(envelope, &p); err != nil {
+		return dlq.Permanent(fmt.Errorf("extract payload (event_id=%s): %w", envelope.EventID, err))
 	}
 
 	n, err := notification.New(
@@ -76,53 +67,26 @@ func (c *Consumer) handleUserFollowed(msg *nats.Msg) {
 		map[string]string{"follower_id": p.FollowerID.String()},
 	)
 	if err != nil {
-		slog.Error("consumer: build notification", "err", err)
-		_ = msg.Term()
-		return
+		return dlq.Permanent(fmt.Errorf("build notification (event_id=%s): %w", envelope.EventID, err))
 	}
 
-	if err := c.svc.CreateAndPush(context.Background(), n); err != nil {
-		slog.Error("consumer: create and push", "err", err)
-		_ = msg.Nak()
-		return
+	if err := c.svc.CreateAndPush(ctx, n); err != nil {
+		return fmt.Errorf("create and push: %w", err)
 	}
-
-	_ = msg.Ack()
+	return nil
 }
 
 // ── posts.created.v1 ──────────────────────────────────────────────────────────
 
-func (c *Consumer) subscribePostCreated() error {
-	_, err := c.js.Subscribe(
-		events.TopicPostCreated,
-		c.handlePostCreated,
-		nats.Durable("notification-service-post-created"),
-		nats.AckExplicit(),
-		nats.MaxDeliver(3),
-		nats.AckWait(30*time.Second),
-		nats.DeliverNew(),
-	)
-	if err != nil {
-		return errors.New("consumer: subscribe posts.created.v1: " + err.Error())
-	}
-	slog.Info("consumer: subscribed", "topic", events.TopicPostCreated)
-	return nil
-}
-
-func (c *Consumer) handlePostCreated(msg *nats.Msg) {
+func (c *Consumer) handlePostCreated(_ context.Context, msg *nats.Msg) error {
 	var envelope events.Envelope
 	if err := json.Unmarshal(msg.Data, &envelope); err != nil {
-		slog.Error("consumer: unmarshal", "topic", events.TopicPostCreated, "err", err)
-		_ = msg.Term()
-		return
+		return dlq.Permanent(fmt.Errorf("unmarshal envelope: %w", err))
 	}
 
-	raw, _ := json.Marshal(envelope.Payload)
 	var p events.PostCreatedPayload
-	if err := json.Unmarshal(raw, &p); err != nil {
-		slog.Error("consumer: extract payload", "event_id", envelope.EventID, "err", err)
-		_ = msg.Term()
-		return
+	if err := decodePayload(envelope, &p); err != nil {
+		return dlq.Permanent(fmt.Errorf("extract payload (event_id=%s): %w", envelope.EventID, err))
 	}
 
 	// TODO fase 2: notificar a seguidores del autor.
@@ -131,6 +95,14 @@ func (c *Consumer) handlePostCreated(msg *nats.Msg) {
 		"post_id", p.PostID,
 		"author_id", p.AuthorID,
 	)
+	return nil
+}
 
-	_ = msg.Ack()
+// decodePayload re-serializa el payload any del Envelope al tipo concreto.
+func decodePayload(env events.Envelope, dst any) error {
+	raw, err := json.Marshal(env.Payload)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(raw, dst)
 }

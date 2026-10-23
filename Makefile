@@ -1,4 +1,4 @@
-.PHONY: up down ps logs build test tidy health nats-streams nats-streams-ls
+.PHONY: up down ps logs build test tidy health nats-streams nats-streams-ls dlq-list dlq-show dlq-replay dlq-replay-all dlq-discard
 
 NATS_SERVER := nats://localhost:4222
 
@@ -82,6 +82,25 @@ nats-streams:
 
 nats-streams-ls:
 	@nats stream ls --server $(NATS_SERVER)
+
+# ── Dead letter queue ─────────────────────────────────────────────────────────
+# Mensajes que fallaron 3 veces (o con payload inválido). Ver shared/dlq.
+DLQ := cd shared && go run ./cmd/dlq -server $(NATS_SERVER)
+
+dlq-list:
+	@$(DLQ) list
+
+dlq-show:          # make dlq-show SEQ=12
+	@$(DLQ) show $(SEQ)
+
+dlq-replay:        # make dlq-replay SEQ=12
+	@$(DLQ) replay $(SEQ)
+
+dlq-replay-all:    # make dlq-replay-all [CONSUMER=feed-service-post-created]
+	@$(DLQ) -consumer "$(CONSUMER)" replay all
+
+dlq-discard:       # make dlq-discard SEQ=12
+	@$(DLQ) discard $(SEQ)
 
 # ── NATS monitoring ───────────────────────────────────────────────────────────
 nats-info:
