@@ -20,6 +20,7 @@ import (
 	natsconsumer "github.com/juantevez/my-ig/notification-service/internal/infrastructure/messaging/nats"
 	"github.com/juantevez/my-ig/notification-service/internal/infrastructure/persistence/postgres"
 	"github.com/juantevez/my-ig/notification-service/internal/infrastructure/ws"
+	"github.com/juantevez/my-ig/shared/outbox"
 	"github.com/juantevez/my-ig/shared/revocation"
 )
 
@@ -52,10 +53,11 @@ func main() {
 
 	// ── Adaptadores ───────────────────────────────────────────────────────────
 	notifRepo := postgres.NewNotificationRepository(db)
+	followStates := postgres.NewFollowStateRepository(db)
 	hub := ws.NewHub()
 
 	// ── Use case ──────────────────────────────────────────────────────────────
-	notifSvc := usecase.NewNotificationService(notifRepo, hub)
+	notifSvc := usecase.NewNotificationService(outbox.NewTxManager(db), notifRepo, followStates, hub)
 
 	// ── NATS consumer ─────────────────────────────────────────────────────────
 	consumer := natsconsumer.NewConsumer(js, notifSvc)

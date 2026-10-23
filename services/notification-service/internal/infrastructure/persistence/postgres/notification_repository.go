@@ -11,9 +11,11 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/juantevez/my-ig/notification-service/internal/domain/notification"
+	"github.com/juantevez/my-ig/shared/outbox"
 )
 
 // NotificationRepository implementa notification.Repository sobre Postgres.
+// Usa la tx del context si existe (outbox.Conn), así participa de TxManager.WithinTx.
 type NotificationRepository struct {
 	db *pgxpool.Pool
 }
@@ -40,7 +42,7 @@ func (r *NotificationRepository) Save(ctx context.Context, n *notification.Notif
 		eventID = &n.EventID
 	}
 
-	tag, err := r.db.Exec(ctx, q,
+	tag, err := outbox.Conn(ctx, r.db).Exec(ctx, q,
 		n.ID, n.TargetUserID, n.SourceUserID,
 		string(n.Type), payload, n.Read, n.CreatedAt, eventID,
 	)
@@ -60,7 +62,7 @@ func (r *NotificationRepository) GetByUser(ctx context.Context, userID uuid.UUID
 	}
 	q += ` ORDER BY created_at DESC LIMIT $2 OFFSET $3`
 
-	rows, err := r.db.Query(ctx, q, userID, limit, offset)
+	rows, err := outbox.Conn(ctx, r.db).Query(ctx, q, userID, limit, offset)
 	if err != nil {
 		return nil, fmt.Errorf("notification_repo.GetByUser: %w", err)
 	}
@@ -77,13 +79,15 @@ func (r *NotificationRepository) GetByUser(ctx context.Context, userID uuid.UUID
 	return notifications, rows.Err()
 }
 
+// MarkRead es idempotente: si ya estaba leída, la fila igual matchea (y read_at
+// conserva el valor original), así que solo "no existe o no es tuya" da not found.
 func (r *NotificationRepository) MarkRead(ctx context.Context, notificationID, userID uuid.UUID) error {
 	const q = `
 		UPDATE notifications
-		SET read = TRUE, read_at = $1
-		WHERE id = $2 AND target_user_id = $3 AND read = FALSE`
+		SET read = TRUE, read_at = COALESCE(read_at, $1)
+		WHERE id = $2 AND target_user_id = $3`
 
-	tag, err := r.db.Exec(ctx, q, time.Now().UTC(), notificationID, userID)
+	tag, err := outbox.Conn(ctx, r.db).Exec(ctx, q, time.Now().UTC(), notificationID, userID)
 	if err != nil {
 		return fmt.Errorf("notification_repo.MarkRead: %w", err)
 	}
@@ -99,7 +103,7 @@ func (r *NotificationRepository) MarkAllRead(ctx context.Context, userID uuid.UU
 		SET read = TRUE, read_at = $1
 		WHERE target_user_id = $2 AND read = FALSE`
 
-	_, err := r.db.Exec(ctx, q, time.Now().UTC(), userID)
+	_, err := outbox.Conn(ctx, r.db).Exec(ctx, q, time.Now().UTC(), userID)
 	if err != nil {
 		return fmt.Errorf("notification_repo.MarkAllRead: %w", err)
 	}
@@ -109,10 +113,57 @@ func (r *NotificationRepository) MarkAllRead(ctx context.Context, userID uuid.UU
 func (r *NotificationRepository) CountUnread(ctx context.Context, userID uuid.UUID) (int, error) {
 	const q = `SELECT COUNT(*) FROM notifications WHERE target_user_id = $1 AND read = FALSE`
 	var count int
-	if err := r.db.QueryRow(ctx, q, userID).Scan(&count); err != nil {
+	if err := outbox.Conn(ctx, r.db).QueryRow(ctx, q, userID).Scan(&count); err != nil {
 		return 0, fmt.Errorf("notification_repo.CountUnread: %w", err)
 	}
 	return count, nil
+}
+
+func (r *NotificationRepository) DeleteNewFollower(ctx context.Context, targetUserID, followerID uuid.UUID) (int64, error) {
+	const q = `
+		DELETE FROM notifications
+		WHERE target_user_id = $1 AND source_user_id = $2 AND type = $3`
+	tag, err := outbox.Conn(ctx, r.db).Exec(ctx, q, targetUserID, followerID, string(notification.TypeNewFollower))
+	if err != nil {
+		return 0, fmt.Errorf("notification_repo.DeleteNewFollower: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
+// ── FollowStateRepository ─────────────────────────────────────────────────────
+
+// FollowStateRepository implementa notification.FollowStateRepository sobre la
+// tabla follow_states. Usa la tx del context si existe (outbox.Conn).
+type FollowStateRepository struct {
+	db *pgxpool.Pool
+}
+
+func NewFollowStateRepository(db *pgxpool.Pool) *FollowStateRepository {
+	return &FollowStateRepository{db: db}
+}
+
+func (r *FollowStateRepository) ApplyFollow(ctx context.Context, followerID, followingID uuid.UUID, at time.Time) (bool, error) {
+	return r.apply(ctx, followerID, followingID, true, at)
+}
+
+func (r *FollowStateRepository) ApplyUnfollow(ctx context.Context, followerID, followingID uuid.UUID, at time.Time) (bool, error) {
+	return r.apply(ctx, followerID, followingID, false, at)
+}
+
+// apply guarda el estado solo si el evento es más nuevo que el último aplicado
+// (estrictamente: una reentrega del mismo evento no vuelve a aplicarse).
+func (r *FollowStateRepository) apply(ctx context.Context, followerID, followingID uuid.UUID, active bool, at time.Time) (bool, error) {
+	const q = `
+		INSERT INTO follow_states (follower_id, following_id, active, state_at)
+		VALUES ($1, $2, $3, $4)
+		ON CONFLICT (follower_id, following_id) DO UPDATE
+		SET active = EXCLUDED.active, state_at = EXCLUDED.state_at
+		WHERE follow_states.state_at < EXCLUDED.state_at`
+	tag, err := outbox.Conn(ctx, r.db).Exec(ctx, q, followerID, followingID, active, at)
+	if err != nil {
+		return false, fmt.Errorf("follow_state_repo.apply: %w", err)
+	}
+	return tag.RowsAffected() > 0, nil
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
