@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -121,6 +122,47 @@ func (h *PostHandler) GetPost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respondJSON(w, http.StatusOK, toPostResponse(result.Post))
+}
+
+// ── GET /users/{id}/posts ─────────────────────────────────────────────────────
+
+// ListUserPosts maneja GET /users/{id}/posts?limit=20&offset=0
+func (h *PostHandler) ListUserPosts(w http.ResponseWriter, r *http.Request) {
+	reqID := chimiddleware.GetReqID(r.Context())
+
+	authorID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "invalid user id")
+		return
+	}
+
+	var requestingUser uuid.UUID
+	if claims, ok := middleware.ClaimsFromContext(r.Context()); ok {
+		requestingUser = claims.Sub
+	}
+
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+
+	result, err := h.posts.ListUserPosts(r.Context(), input.ListUserPostsQuery{
+		AuthorID:       authorID,
+		RequestingUser: requestingUser,
+		Limit:          limit,
+		Offset:         offset,
+	})
+	if err != nil {
+		slog.Error("list_user_posts: unexpected error", "request_id", reqID, "author_id", authorID, "err", err)
+		respondError(w, http.StatusInternalServerError, "failed to list posts")
+		return
+	}
+
+	resp := make([]postResponse, 0, len(result.Posts))
+	for _, p := range result.Posts {
+		resp = append(resp, toPostResponse(p))
+	}
+
+	slog.Info("list_user_posts: ok", "request_id", reqID, "author_id", authorID, "count", len(resp))
+	respondJSON(w, http.StatusOK, resp)
 }
 
 // ── DELETE /posts/{id} ────────────────────────────────────────────────────────

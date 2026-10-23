@@ -39,6 +39,7 @@ func New(posts *handler.PostHandler, jwtSecret string) http.Handler {
 	r.Group(func(r chi.Router) {
 		r.Use(contentmw.JWTMiddleware(jwtSecret))
 		r.Post("/posts", posts.CreatePost)
+		r.Get("/users/{id}/posts", posts.ListUserPosts)
 		r.Delete("/posts/{id}", posts.DeletePost)
 	})
 

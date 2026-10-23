@@ -33,6 +33,19 @@ type GetPostResult struct {
 	Post *post.Post
 }
 
+// ── ListUserPosts ─────────────────────────────────────────────────────────────
+
+type ListUserPostsQuery struct {
+	AuthorID       uuid.UUID
+	RequestingUser uuid.UUID // el autor ve todos sus posts; el resto solo los visibles
+	Limit          int
+	Offset         int
+}
+
+type ListUserPostsResult struct {
+	Posts []*post.Post
+}
+
 // ── DeletePost ────────────────────────────────────────────────────────────────
 
 type DeletePostCommand struct {
@@ -48,5 +61,6 @@ type DeletePostCommand struct {
 type PostUseCase interface {
 	CreatePost(ctx context.Context, cmd CreatePostCommand) (*CreatePostResult, error)
 	GetPost(ctx context.Context, q GetPostQuery) (*GetPostResult, error)
+	ListUserPosts(ctx context.Context, q ListUserPostsQuery) (*ListUserPostsResult, error)
 	DeletePost(ctx context.Context, cmd DeletePostCommand) error
 }
