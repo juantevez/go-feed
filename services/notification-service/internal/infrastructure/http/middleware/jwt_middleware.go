@@ -36,26 +36,69 @@ func JWTMiddleware(secret string, revoked RevocationChecker) func(http.Handler) 
 				respondError(w, http.StatusUnauthorized, "missing authorization header")
 				return
 			}
-
-			claims, err := parseToken(strings.TrimPrefix(raw, "Bearer "), secret)
-			if err != nil {
-				if errors.Is(err, gojwt.ErrTokenExpired) {
-					respondError(w, http.StatusUnauthorized, "token expired")
-				} else {
-					respondError(w, http.StatusUnauthorized, "invalid token")
-				}
-				return
-			}
-
-			if revoked.IsRevoked(claims.JTI) {
-				respondError(w, http.StatusUnauthorized, "token revoked")
-				return
-			}
-
-			ctx := context.WithValue(r.Context(), claimsKey, claims)
-			next.ServeHTTP(w, r.WithContext(ctx))
+			authenticate(w, r, next, strings.TrimPrefix(raw, "Bearer "), secret, revoked)
 		})
 	}
+}
+
+// JWTWebSocketMiddleware autentica el upgrade a WebSocket. Acepta el token en el
+// header Authorization (clientes que pueden mandar headers) o como subprotocolo:
+// la API WebSocket del navegador no permite headers, solo subprotocolos, así que
+// el front abre la conexión con new WebSocket(url, [tokenProtocol, token]).
+// No se acepta por query string: la URL completa queda en los logs.
+func JWTWebSocketMiddleware(secret string, revoked RevocationChecker, tokenProtocol string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if raw := r.Header.Get("Authorization"); strings.HasPrefix(raw, "Bearer ") {
+				authenticate(w, r, next, strings.TrimPrefix(raw, "Bearer "), secret, revoked)
+				return
+			}
+			token, ok := tokenFromSubprotocols(r, tokenProtocol)
+			if !ok {
+				respondError(w, http.StatusUnauthorized, "missing access token")
+				return
+			}
+			authenticate(w, r, next, token, secret, revoked)
+		})
+	}
+}
+
+// tokenFromSubprotocols busca, en Sec-WebSocket-Protocol, el valor que sigue a
+// tokenProtocol: el navegador manda "access_token, <jwt>".
+func tokenFromSubprotocols(r *http.Request, tokenProtocol string) (string, bool) {
+	var protocols []string
+	for _, h := range r.Header.Values("Sec-WebSocket-Protocol") {
+		for _, p := range strings.Split(h, ",") {
+			protocols = append(protocols, strings.TrimSpace(p))
+		}
+	}
+	for i := 0; i+1 < len(protocols); i++ {
+		if protocols[i] == tokenProtocol && protocols[i+1] != "" {
+			return protocols[i+1], true
+		}
+	}
+	return "", false
+}
+
+// authenticate valida el token y, si es válido, sigue con los claims en el contexto.
+func authenticate(w http.ResponseWriter, r *http.Request, next http.Handler, tokenStr, secret string, revoked RevocationChecker) {
+	claims, err := parseToken(tokenStr, secret)
+	if err != nil {
+		if errors.Is(err, gojwt.ErrTokenExpired) {
+			respondError(w, http.StatusUnauthorized, "token expired")
+		} else {
+			respondError(w, http.StatusUnauthorized, "invalid token")
+		}
+		return
+	}
+
+	if revoked.IsRevoked(claims.JTI) {
+		respondError(w, http.StatusUnauthorized, "token revoked")
+		return
+	}
+
+	ctx := context.WithValue(r.Context(), claimsKey, claims)
+	next.ServeHTTP(w, r.WithContext(ctx))
 }
 
 func ClaimsFromContext(ctx context.Context) (*Claims, bool) {

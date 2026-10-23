@@ -18,12 +18,20 @@ const (
 	pongWait       = 60 * time.Second
 	pingPeriod     = (pongWait * 9) / 10
 	maxMessageSize = 512
+	sendBuffer     = 64
 )
+
+// TokenSubprotocol es el subprotocolo con el que un navegador manda el access
+// token en el upgrade: new WebSocket(url, ["access_token", token]). El servidor
+// lo selecciona en la respuesta (el navegador corta la conexión si no lo hace).
+const TokenSubprotocol = "access_token"
 
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
-	// En producción validar el origen (CheckOrigin)
+	Subprotocols:    []string{TokenSubprotocol},
+	// Sin chequeo de origen: la auth no va por cookie, así que otra página no
+	// puede abrir un WebSocket en nombre del usuario sin tener su token.
 	CheckOrigin: func(r *http.Request) bool { return true },
 }
 
@@ -43,8 +51,9 @@ func NewHub() *Hub {
 // Push envía una notificación a todas las conexiones activas del usuario.
 // Si el usuario no está conectado, no hace nada (no es un error).
 func (h *Hub) Push(_ context.Context, userID uuid.UUID, n *notification.Notification) error {
+	// Copia bajo lock: remove reescribe el slice y no se puede recorrer sin él.
 	h.mu.RLock()
-	clients := h.clients[userID]
+	clients := append([]*Client(nil), h.clients[userID]...)
 	h.mu.RUnlock()
 
 	if len(clients) == 0 {
@@ -59,8 +68,11 @@ func (h *Hub) Push(_ context.Context, userID uuid.UUID, n *notification.Notifica
 	for _, c := range clients {
 		select {
 		case c.send <- msg:
+		case <-c.done:
+			// Se desconectó mientras tanto: su writePump ya no lee send.
 		default:
 			// Buffer lleno — cliente lento, desconectar
+			slog.Warn("ws: slow client, disconnecting", "user_id", userID)
 			h.remove(userID, c)
 		}
 	}
@@ -80,7 +92,8 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request, userID uuid.UUID) 
 		hub:    h,
 		userID: userID,
 		conn:   conn,
-		send:   make(chan []byte, 64),
+		send:   make(chan []byte, sendBuffer),
+		done:   make(chan struct{}),
 	}
 
 	h.register(userID, client)
@@ -98,31 +111,50 @@ func (h *Hub) register(userID uuid.UUID, c *Client) {
 	slog.Info("ws: client connected", "user_id", userID, "total", len(h.clients[userID]))
 }
 
+// remove saca al cliente del hub y lo cierra. Es idempotente: lo llaman tanto
+// Push (cliente lento) como readPump (desconexión), a veces los dos para la
+// misma conexión.
 func (h *Hub) remove(userID uuid.UUID, c *Client) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	clients := h.clients[userID]
-	for i, cl := range clients {
-		if cl == c {
-			h.clients[userID] = append(clients[:i], clients[i+1:]...)
-			break
+	kept := make([]*Client, 0, len(clients))
+	for _, cl := range clients {
+		if cl != c {
+			kept = append(kept, cl)
 		}
 	}
-	if len(h.clients[userID]) == 0 {
+	removed := len(kept) < len(clients)
+	if len(kept) == 0 {
 		delete(h.clients, userID)
+	} else {
+		h.clients[userID] = kept
 	}
-	close(c.send)
-	slog.Info("ws: client disconnected", "user_id", userID)
+	h.mu.Unlock()
+
+	c.close()
+	if removed {
+		slog.Info("ws: client disconnected", "user_id", userID)
+	}
 }
 
 // ── Client ────────────────────────────────────────────────────────────────────
 
 // Client representa una conexión WebSocket individual.
+//
+// send nunca se cierra: varios goroutines le escriben (Push) y cerrarlo desde
+// remove hacía que un Push concurrente o un segundo remove entraran en panic. El
+// fin de la conexión se señala cerrando done, una sola vez.
 type Client struct {
-	hub    *Hub
-	userID uuid.UUID
-	conn   *websocket.Conn
-	send   chan []byte
+	hub       *Hub
+	userID    uuid.UUID
+	conn      *websocket.Conn
+	send      chan []byte
+	done      chan struct{}
+	closeOnce sync.Once
+}
+
+func (c *Client) close() {
+	c.closeOnce.Do(func() { close(c.done) })
 }
 
 // writePump escribe mensajes del canal send a la conexión WebSocket.
@@ -130,20 +162,20 @@ func (c *Client) writePump() {
 	ticker := time.NewTicker(pingPeriod)
 	defer func() {
 		ticker.Stop()
-		c.conn.Close()
+		c.conn.Close() // readPump lo detecta y hace remove
 	}()
 
 	for {
 		select {
-		case msg, ok := <-c.send:
+		case msg := <-c.send:
 			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
-			if !ok {
-				c.conn.WriteMessage(websocket.CloseMessage, []byte{})
-				return
-			}
 			if err := c.conn.WriteMessage(websocket.TextMessage, msg); err != nil {
 				return
 			}
+		case <-c.done:
+			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
+			c.conn.WriteMessage(websocket.CloseMessage, []byte{})
+			return
 		case <-ticker.C:
 			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {

@@ -7,6 +7,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/juantevez/my-ig/notification-service/internal/infrastructure/http/handler"
 	notifmw "github.com/juantevez/my-ig/notification-service/internal/infrastructure/http/middleware"
+	"github.com/juantevez/my-ig/notification-service/internal/infrastructure/ws"
 )
 
 func New(notif *handler.NotificationHandler, jwtSecret string, revoked notifmw.RevocationChecker) http.Handler {
@@ -31,10 +32,12 @@ func New(notif *handler.NotificationHandler, jwtSecret string, revoked notifmw.R
 		r.Get("/notifications", notif.GetNotifications)
 		r.Patch("/notifications/{id}/read", notif.MarkRead)
 		r.Patch("/notifications/read-all", notif.MarkAllRead)
-
-		// WebSocket — upgrade desde HTTP con JWT validado
-		r.Get("/ws", notif.ServeWS)
 	})
+
+	// WebSocket — upgrade desde HTTP con JWT validado. El navegador no puede
+	// mandar Authorization en el upgrade: manda el token como subprotocolo.
+	r.With(notifmw.JWTWebSocketMiddleware(jwtSecret, revoked, ws.TokenSubprotocol)).
+		Get("/ws", notif.ServeWS)
 
 	return r
 }
