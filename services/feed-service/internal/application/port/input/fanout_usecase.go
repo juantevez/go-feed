@@ -13,6 +13,7 @@ type FanOutCommand struct {
 	PostID      uuid.UUID
 	AuthorID    uuid.UUID
 	PublishedAt time.Time
+	Visibility  string // "public", "followers_only", "private" (de posts.created.v1)
 }
 
 // FanOutUseCase es el puerto driving para el worker de fan-out.

@@ -238,6 +238,7 @@ func extractPostCreatedCommand(env events.Envelope) (input.FanOutCommand, error)
 		PostID:      p.PostID,
 		AuthorID:    p.AuthorID,
 		PublishedAt: p.CreatedAt,
+		Visibility:  p.Visibility,
 	}, nil
 }
 

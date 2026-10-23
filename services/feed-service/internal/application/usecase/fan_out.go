@@ -14,6 +14,11 @@ import (
 // Evita queries gigantes con miles de seguidores.
 const fanOutBatchSize = 500
 
+// visibilityPublic es el único valor de visibility que llega al feed de los seguidores.
+// followers_only también queda afuera: content-service todavía no consulta el grafo
+// social y les responde 404 a los seguidores.
+const visibilityPublic = "public"
+
 // FanOutService implementa input.FanOutUseCase.
 // Consume posts.created.v1 y propaga el post al feed del autor y de cada seguidor activo.
 type FanOutService struct {
@@ -25,7 +30,8 @@ func NewFanOutService(feeds feed.Repository, followers feed.FollowerRepository) 
 	return &FanOutService{feeds: feeds, followers: followers}
 }
 
-// FanOut propaga el post al feed del autor y a los de todos sus seguidores activos.
+// FanOut propaga el post al feed del autor y, si es público, a los de todos sus
+// seguidores activos. Un post no público solo llega al feed del autor.
 //
 // Estrategia: fan-out sincrónico en batches.
 // Para autores con > 10k seguidores se usará fan-in lazy (fase 2).
@@ -33,14 +39,19 @@ func NewFanOutService(feeds feed.Repository, followers feed.FollowerRepository) 
 // Idempotencia: BulkInsert usa ON CONFLICT DO NOTHING — si el worker
 // reprocesa el mismo evento, no genera duplicados.
 func (s *FanOutService) FanOut(ctx context.Context, cmd input.FanOutCommand) error {
-	// Índice por autor: lo usa el backfill cuando alguien empieza a seguirlo.
-	if err := s.feeds.SaveAuthorPost(ctx, cmd.PostID, cmd.AuthorID, cmd.PublishedAt); err != nil {
-		return fmt.Errorf("fan_out: save author post: %w", err)
-	}
+	var followerIDs []uuid.UUID
+	if cmd.Visibility == visibilityPublic {
+		// Índice por autor: lo usa el backfill cuando alguien empieza a seguirlo,
+		// así que solo lleva posts públicos.
+		if err := s.feeds.SaveAuthorPost(ctx, cmd.PostID, cmd.AuthorID, cmd.PublishedAt); err != nil {
+			return fmt.Errorf("fan_out: save author post: %w", err)
+		}
 
-	followerIDs, err := s.followers.GetActiveFollowers(ctx, cmd.AuthorID)
-	if err != nil {
-		return fmt.Errorf("fan_out: get followers: %w", err)
+		var err error
+		followerIDs, err = s.followers.GetActiveFollowers(ctx, cmd.AuthorID)
+		if err != nil {
+			return fmt.Errorf("fan_out: get followers: %w", err)
+		}
 	}
 
 	// El autor siempre ve sus propios posts en su timeline.
@@ -55,6 +66,7 @@ func (s *FanOutService) FanOut(ctx context.Context, cmd input.FanOutCommand) err
 	slog.Info("fan_out: propagating post",
 		"post_id", cmd.PostID,
 		"author_id", cmd.AuthorID,
+		"visibility", cmd.Visibility,
 		"followers", len(followerIDs),
 	)
 
