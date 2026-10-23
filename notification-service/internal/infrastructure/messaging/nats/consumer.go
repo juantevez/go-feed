@@ -70,7 +70,7 @@ func (c *Consumer) handleUserFollowed(ctx context.Context, msg *nats.Msg) error 
 		return dlq.Permanent(fmt.Errorf("build notification (event_id=%s): %w", envelope.EventID, err))
 	}
 
-	if err := c.svc.CreateAndPush(ctx, n); err != nil {
+	if err := c.svc.CreateAndPush(ctx, n.FromEvent(envelope.EventID)); err != nil {
 		return fmt.Errorf("create and push: %w", err)
 	}
 	return nil

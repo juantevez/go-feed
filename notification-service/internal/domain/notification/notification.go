@@ -30,6 +30,7 @@ type Notification struct {
 	SourceUserID uuid.UUID // usuario que la genera
 	Type         Type
 	Payload      map[string]string // datos extra: post_id, comment_id, etc.
+	EventID      uuid.UUID         // evento del bus que la originó (uuid.Nil si no viene de un evento)
 	Read         bool
 	CreatedAt    time.Time
 	ReadAt       *time.Time
@@ -59,6 +60,13 @@ func New(targetUserID, sourceUserID uuid.UUID, t Type, payload map[string]string
 		Read:         false,
 		CreatedAt:    time.Now().UTC(),
 	}, nil
+}
+
+// FromEvent asocia la notificación al evento que la originó.
+// Con EventID seteado, Save es idempotente ante reentregas del mismo evento.
+func (n *Notification) FromEvent(eventID uuid.UUID) *Notification {
+	n.EventID = eventID
+	return n
 }
 
 // MarkRead marca la notificación como leída.

@@ -22,24 +22,32 @@ func NewNotificationRepository(db *pgxpool.Pool) *NotificationRepository {
 	return &NotificationRepository{db: db}
 }
 
-func (r *NotificationRepository) Save(ctx context.Context, n *notification.Notification) error {
+func (r *NotificationRepository) Save(ctx context.Context, n *notification.Notification) (bool, error) {
 	payload, err := json.Marshal(n.Payload)
 	if err != nil {
-		return fmt.Errorf("notification_repo.Save: marshal payload: %w", err)
+		return false, fmt.Errorf("notification_repo.Save: marshal payload: %w", err)
 	}
 
+	// ON CONFLICT sobre el índice parcial uq_notif_event_target: una reentrega
+	// del mismo evento no duplica la notificación.
 	const q = `
-		INSERT INTO notifications (id, target_user_id, source_user_id, type, payload, read, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)`
+		INSERT INTO notifications (id, target_user_id, source_user_id, type, payload, read, created_at, event_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		ON CONFLICT (event_id, target_user_id) WHERE event_id IS NOT NULL DO NOTHING`
 
-	_, err = r.db.Exec(ctx, q,
+	var eventID *uuid.UUID
+	if n.EventID != uuid.Nil {
+		eventID = &n.EventID
+	}
+
+	tag, err := r.db.Exec(ctx, q,
 		n.ID, n.TargetUserID, n.SourceUserID,
-		string(n.Type), payload, n.Read, n.CreatedAt,
+		string(n.Type), payload, n.Read, n.CreatedAt, eventID,
 	)
 	if err != nil {
-		return fmt.Errorf("notification_repo.Save: %w", err)
+		return false, fmt.Errorf("notification_repo.Save: %w", err)
 	}
-	return nil
+	return tag.RowsAffected() > 0, nil
 }
 
 func (r *NotificationRepository) GetByUser(ctx context.Context, userID uuid.UUID, limit, offset int, unreadOnly bool) ([]*notification.Notification, error) {

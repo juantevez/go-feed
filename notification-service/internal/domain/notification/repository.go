@@ -8,8 +8,9 @@ import (
 
 // Repository es el puerto driven para persistencia de notificaciones.
 type Repository interface {
-	// Save persiste una nueva notificación.
-	Save(ctx context.Context, n *Notification) error
+	// Save persiste una nueva notificación. Si ya existe una para el mismo
+	// (EventID, TargetUserID) no hace nada y retorna false (reentrega del evento).
+	Save(ctx context.Context, n *Notification) (bool, error)
 
 	// GetByUser retorna las notificaciones de un usuario (más recientes primero).
 	// unreadOnly filtra solo las no leídas.

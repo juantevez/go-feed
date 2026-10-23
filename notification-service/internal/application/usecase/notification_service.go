@@ -3,6 +3,7 @@ package usecase
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
 	"github.com/google/uuid"
 	"github.com/juantevez/my-ig/notification-service/internal/application/port/input"
@@ -60,10 +61,17 @@ func (s *NotificationService) MarkAllRead(ctx context.Context, userID uuid.UUID)
 }
 
 // CreateAndPush crea una notificación, la persiste y la envía via WebSocket.
-// Llamado internamente por los workers de NATS.
+// Llamado internamente por los workers de NATS. Idempotente por (EventID, TargetUserID):
+// si el evento ya fue procesado no vuelve a persistir ni a pushear.
 func (s *NotificationService) CreateAndPush(ctx context.Context, n *notification.Notification) error {
-	if err := s.repo.Save(ctx, n); err != nil {
+	created, err := s.repo.Save(ctx, n)
+	if err != nil {
 		return fmt.Errorf("create_and_push: save: %w", err)
+	}
+	if !created {
+		slog.Info("create_and_push: duplicate event ignored",
+			"event_id", n.EventID, "target_user_id", n.TargetUserID)
+		return nil
 	}
 
 	// Push via WebSocket — fire-and-forget si el usuario no está conectado.
