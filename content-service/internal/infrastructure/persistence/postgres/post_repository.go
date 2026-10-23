@@ -76,16 +76,19 @@ func (r *PostRepository) Update(ctx context.Context, p *post.Post) error {
 	return nil
 }
 
-func (r *PostRepository) FindByAuthor(ctx context.Context, authorID uuid.UUID, limit, offset int) ([]*post.Post, error) {
+func (r *PostRepository) FindByAuthor(ctx context.Context, authorID uuid.UUID, onlyVisible bool, limit, offset int) ([]*post.Post, error) {
+	// El filtro de visibilidad va en SQL (no después del LIMIT) para que las
+	// páginas vengan completas. Debe coincidir con Post.IsVisible.
 	const q = `
 		SELECT id, author_id, caption, status, visibility, media_urls, tags,
 		       created_at, updated_at, deleted_at
 		FROM posts
 		WHERE author_id = $1 AND status != 'deleted'
+		  AND (NOT $4 OR (status = 'published' AND visibility = 'public'))
 		ORDER BY created_at DESC
 		LIMIT $2 OFFSET $3`
 
-	rows, err := outbox.Conn(ctx, r.db).Query(ctx, q, authorID, limit, offset)
+	rows, err := outbox.Conn(ctx, r.db).Query(ctx, q, authorID, limit, offset, onlyVisible)
 	if err != nil {
 		return nil, fmt.Errorf("post_repo.FindByAuthor: %w", err)
 	}
