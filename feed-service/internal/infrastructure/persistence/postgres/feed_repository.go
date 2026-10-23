@@ -19,22 +19,22 @@ func NewFeedRepository(db *pgxpool.Pool) *FeedRepository {
 	return &FeedRepository{db: db}
 }
 
-// BulkInsert inserta múltiples entradas usando pgx.CopyFrom — el método más
-// eficiente para inserts masivos en Postgres (protocolo COPY).
+// BulkInsert inserta múltiples entradas en un único round-trip usando pgx.Batch.
+// No usamos CopyFrom porque COPY no soporta ON CONFLICT: ante un redelivery
+// del evento fallaría por UNIQUE (user_id, post_id).
 // ON CONFLICT DO NOTHING garantiza idempotencia ante redelivery de eventos.
 func (r *FeedRepository) BulkInsert(ctx context.Context, entries []*feed.FeedEntry) error {
-	rows := make([][]any, len(entries))
-	for i, e := range entries {
-		rows[i] = []any{e.ID, e.UserID, e.PostID, e.AuthorID, e.Score, e.InsertedAt}
+	const q = `
+		INSERT INTO feed_entries (id, user_id, post_id, author_id, score, inserted_at)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		ON CONFLICT (user_id, post_id) DO NOTHING`
+
+	batch := &pgx.Batch{}
+	for _, e := range entries {
+		batch.Queue(q, e.ID, e.UserID, e.PostID, e.AuthorID, e.Score, e.InsertedAt)
 	}
 
-	_, err := r.db.CopyFrom(
-		ctx,
-		pgx.Identifier{"feed_entries"},
-		[]string{"id", "user_id", "post_id", "author_id", "score", "inserted_at"},
-		pgx.CopyFromRows(rows),
-	)
-	if err != nil {
+	if err := r.db.SendBatch(ctx, batch).Close(); err != nil {
 		return fmt.Errorf("feed_repo.BulkInsert: %w", err)
 	}
 	return nil

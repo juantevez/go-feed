@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 
+	"github.com/google/uuid"
 	"github.com/juantevez/my-ig/feed-service/internal/application/port/input"
 	"github.com/juantevez/my-ig/feed-service/internal/domain/feed"
 )
@@ -14,7 +15,7 @@ import (
 const fanOutBatchSize = 500
 
 // FanOutService implementa input.FanOutUseCase.
-// Consume posts.created.v1 y propaga el post al feed de cada seguidor activo.
+// Consume posts.created.v1 y propaga el post al feed del autor y de cada seguidor activo.
 type FanOutService struct {
 	feeds     feed.Repository
 	followers feed.FollowerRepository
@@ -24,7 +25,7 @@ func NewFanOutService(feeds feed.Repository, followers feed.FollowerRepository) 
 	return &FanOutService{feeds: feeds, followers: followers}
 }
 
-// FanOut propaga el post a los feeds de todos los seguidores activos del autor.
+// FanOut propaga el post al feed del autor y a los de todos sus seguidores activos.
 //
 // Estrategia: fan-out sincrónico en batches.
 // Para autores con > 10k seguidores se usará fan-in lazy (fase 2).
@@ -37,12 +38,13 @@ func (s *FanOutService) FanOut(ctx context.Context, cmd input.FanOutCommand) err
 		return fmt.Errorf("fan_out: get followers: %w", err)
 	}
 
-	if len(followerIDs) == 0 {
-		slog.Info("fan_out: no active followers, skipping",
-			"author_id", cmd.AuthorID,
-			"post_id", cmd.PostID,
-		)
-		return nil
+	// El autor siempre ve sus propios posts en su timeline.
+	recipients := make([]uuid.UUID, 0, len(followerIDs)+1)
+	recipients = append(recipients, cmd.AuthorID)
+	for _, id := range followerIDs {
+		if id != cmd.AuthorID {
+			recipients = append(recipients, id)
+		}
 	}
 
 	slog.Info("fan_out: propagating post",
@@ -52,9 +54,9 @@ func (s *FanOutService) FanOut(ctx context.Context, cmd input.FanOutCommand) err
 	)
 
 	// Procesamos en batches para no saturar la DB con un INSERT masivo.
-	for i := 0; i < len(followerIDs); i += fanOutBatchSize {
-		end := min(i+fanOutBatchSize, len(followerIDs))
-		batch := followerIDs[i:end]
+	for i := 0; i < len(recipients); i += fanOutBatchSize {
+		end := min(i+fanOutBatchSize, len(recipients))
+		batch := recipients[i:end]
 
 		entries := make([]*feed.FeedEntry, 0, len(batch))
 		for _, followerID := range batch {
@@ -79,7 +81,7 @@ func (s *FanOutService) FanOut(ctx context.Context, cmd input.FanOutCommand) err
 		}
 	}
 
-	slog.Info("fan_out: done", "post_id", cmd.PostID, "followers", len(followerIDs))
+	slog.Info("fan_out: done", "post_id", cmd.PostID, "recipients", len(recipients))
 	return nil
 }
 
