@@ -236,15 +236,9 @@ paths:
       servers:
         - url: http://localhost:8081
       description: |
-        Requiere el header `X-User-ID` con el UUID del usuario autenticado.
-        En producción lo inyecta el API Gateway desde el JWT validado.
-        El cursor tiene formato `{score}_{post_id}` (opaco para el cliente).
+        Devuelve el feed del usuario del token (claim `sub`); no hay forma de pedir el
+        de otro. El cursor tiene formato `{score}_{post_id}` (opaco para el cliente).
       parameters:
-        - name: X-User-ID
-          in: header
-          required: true
-          schema: { type: string, format: uuid }
-          description: UUID del usuario autenticado
         - name: cursor
           in: query
           schema: { type: string }
@@ -261,7 +255,8 @@ paths:
                 $ref: '#/components/schemas/FeedResponse'
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
-      security: []
+      security:
+        - BearerAuth: []
 
   # ─────────────────────────────────────────────────────────────
   # SOCIAL  (localhost:8083)
