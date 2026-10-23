@@ -12,6 +12,7 @@ info:
     | feed-service   | 8081   |
     | content-service| 8082   |
     | social-service | 8083   |
+    | notification-service | 8084 |
 
 tags:
   - name: Auth
@@ -22,6 +23,8 @@ tags:
     description: feed-service — timeline paginado por score (`:8081`)
   - name: Social
     description: social-service — follow / unfollow y estadísticas (`:8083`)
+  - name: Notification
+    description: notification-service — notificaciones y push por WebSocket (`:8084`)
 
 paths:
   # ─────────────────────────────────────────────────────────────
@@ -392,6 +395,104 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
       security: []
 
+  # ─────────────────────────────────────────────────────────────
+  # NOTIFICATION  (localhost:8084)
+  # ─────────────────────────────────────────────────────────────
+  /notifications:
+    get:
+      tags: [Notification]
+      summary: Listar notificaciones del usuario del token
+      operationId: getNotifications
+      servers:
+        - url: http://localhost:8084
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+        - name: offset
+          in: query
+          schema: { type: integer, minimum: 0, default: 0 }
+        - name: unread
+          in: query
+          description: Con `true` devuelve solo las no leídas
+          schema: { type: boolean, default: false }
+      responses:
+        '200':
+          description: Notificaciones (más recientes primero) y total de no leídas
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationList'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+      security:
+        - BearerAuth: []
+
+  /notifications/{id}/read:
+    patch:
+      tags: [Notification]
+      summary: Marcar una notificación como leída
+      operationId: markNotificationRead
+      servers:
+        - url: http://localhost:8084
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '204':
+          description: Marcada como leída
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404':
+          description: No existe, no es del usuario o ya estaba leída
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+      security:
+        - BearerAuth: []
+
+  /notifications/read-all:
+    patch:
+      tags: [Notification]
+      summary: Marcar todas las notificaciones del usuario como leídas
+      operationId: markAllNotificationsRead
+      servers:
+        - url: http://localhost:8084
+      responses:
+        '204':
+          description: Todas marcadas como leídas
+        '401': { $ref: '#/components/responses/Unauthorized' }
+      security:
+        - BearerAuth: []
+
+  /ws:
+    get:
+      tags: [Notification]
+      summary: WebSocket de notificaciones en tiempo real
+      operationId: notificationsWebSocket
+      servers:
+        - url: ws://localhost:8084
+      description: |
+        Upgrade a WebSocket. El access token va como subprotocolo desde el navegador
+        (`new WebSocket(url, ["access_token", token])`; el servidor selecciona
+        `access_token`) o en el header `Authorization: Bearer <token>` desde otros
+        clientes. No se acepta por query string. El servidor manda un mensaje JSON por
+        cada notificación nueva (`type`, `id`, `payload`, `created_at`); el cliente no
+        manda nada.
+      parameters:
+        - name: Sec-WebSocket-Protocol
+          in: header
+          required: false
+          description: '`access_token, <jwt>` (lo arma el navegador a partir del array de subprotocolos)'
+          schema: { type: string }
+      responses:
+        '101':
+          description: Conexión WebSocket establecida
+        '401': { $ref: '#/components/responses/Unauthorized' }
+      security:
+        - BearerAuth: []
+
 components:
   securitySchemes:
     BearerAuth:
@@ -538,6 +639,40 @@ components:
         follower_count:
           type: integer
         following_count:
+          type: integer
+
+    # ── Notification ──────────────────────────────────────────
+    Notification:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        type:
+          type: string
+          enum: [new_follower, new_post, post_liked, comment_added]
+          description: Hoy solo se genera `new_follower`
+        source_user_id:
+          type: string
+          format: uuid
+        payload:
+          type: object
+          additionalProperties: { type: string }
+          example: { follower_id: "f7c3a3eb-6804-4e2b-a998-f3393b7f93fa" }
+        read:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+
+    NotificationList:
+      type: object
+      properties:
+        notifications:
+          type: array
+          items:
+            $ref: '#/components/schemas/Notification'
+        unread_count:
           type: integer
 
     # ── Error ─────────────────────────────────────────────────
