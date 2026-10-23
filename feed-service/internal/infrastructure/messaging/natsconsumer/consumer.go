@@ -29,9 +29,12 @@ type feedDeleter interface {
 }
 
 // followerWriter sincroniza el grafo social en la DB local del feed-service.
+// Ambos métodos son last-write-wins por timestamp del evento: followed y
+// unfollowed llegan por subscriptions paralelas y pueden procesarse desordenados.
+// Retornan false si el evento era más viejo que el estado actual (se descarta).
 type followerWriter interface {
-	SaveFollower(ctx context.Context, followerID, followingID uuid.UUID) error
-	DeleteFollower(ctx context.Context, followerID, followingID uuid.UUID) error
+	SaveFollower(ctx context.Context, followerID, followingID uuid.UUID, at time.Time) (bool, error)
+	MarkUnfollowed(ctx context.Context, followerID, followingID uuid.UUID, at time.Time) (bool, error)
 }
 
 func NewConsumer(js nats.JetStreamContext, fanOut input.FanOutUseCase, feedRepo feedDeleter, followerRepo followerWriter) *Consumer {
@@ -247,10 +250,15 @@ func (c *Consumer) handleUserFollowed(msg *nats.Msg) {
 
 	slog.Info("consumer: saving follower", "follower_id", p.FollowerID, "following_id", p.FollowingID)
 
-	if err := c.followerRepo.SaveFollower(ctx, p.FollowerID, p.FollowingID); err != nil {
+	applied, err := c.followerRepo.SaveFollower(ctx, p.FollowerID, p.FollowingID, p.FollowedAt)
+	if err != nil {
 		slog.Error("consumer: save follower failed", "err", err)
 		_ = msg.Nak()
 		return
+	}
+	if !applied {
+		slog.Info("consumer: stale follow event ignored", "event_id", envelope.EventID,
+			"follower_id", p.FollowerID, "following_id", p.FollowingID)
 	}
 
 	_ = msg.Ack()
@@ -299,10 +307,15 @@ func (c *Consumer) handleUserUnfollowed(msg *nats.Msg) {
 
 	slog.Info("consumer: removing follower", "follower_id", p.FollowerID, "following_id", p.FollowingID)
 
-	if err := c.followerRepo.DeleteFollower(ctx, p.FollowerID, p.FollowingID); err != nil {
-		slog.Error("consumer: delete follower failed", "err", err)
+	applied, err := c.followerRepo.MarkUnfollowed(ctx, p.FollowerID, p.FollowingID, p.UnfollowedAt)
+	if err != nil {
+		slog.Error("consumer: mark unfollowed failed", "err", err)
 		_ = msg.Nak()
 		return
+	}
+	if !applied {
+		slog.Info("consumer: stale unfollow event ignored", "event_id", envelope.EventID,
+			"follower_id", p.FollowerID, "following_id", p.FollowingID)
 	}
 
 	_ = msg.Ack()

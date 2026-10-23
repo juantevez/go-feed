@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -122,26 +123,39 @@ func NewFollowerRepository(db *pgxpool.Pool) *FollowerRepository {
 	return &FollowerRepository{db: db}
 }
 
-// SaveFollower inserta o actualiza la relación follower → following.
-// ON CONFLICT actualiza last_seen_at para mantener el usuario "activo".
-func (r *FollowerRepository) SaveFollower(ctx context.Context, followerID, followingID uuid.UUID) error {
+// SaveFollower aplica un evento users.followed.v1 ocurrido en `at`.
+// Last-write-wins: solo se aplica si es más nuevo que el último evento de esa
+// relación (state_at). Retorna false si el evento era viejo y se descartó.
+func (r *FollowerRepository) SaveFollower(ctx context.Context, followerID, followingID uuid.UUID, at time.Time) (bool, error) {
 	const q = `
-		INSERT INTO followers (follower_id, following_id, last_seen_at, created_at)
-		VALUES ($1, $2, NOW(), NOW())
-		ON CONFLICT (follower_id, following_id) DO UPDATE SET last_seen_at = NOW()`
-	if _, err := r.db.Exec(ctx, q, followerID, followingID); err != nil {
-		return fmt.Errorf("follower_repo.SaveFollower: %w", err)
+		INSERT INTO followers (follower_id, following_id, active, state_at, last_seen_at, created_at)
+		VALUES ($1, $2, TRUE, $3, NOW(), NOW())
+		ON CONFLICT (follower_id, following_id) DO UPDATE
+		SET active = TRUE, state_at = EXCLUDED.state_at, last_seen_at = NOW()
+		WHERE followers.state_at < EXCLUDED.state_at`
+	tag, err := r.db.Exec(ctx, q, followerID, followingID, at)
+	if err != nil {
+		return false, fmt.Errorf("follower_repo.SaveFollower: %w", err)
 	}
-	return nil
+	return tag.RowsAffected() > 0, nil
 }
 
-// DeleteFollower elimina la relación follower → following.
-func (r *FollowerRepository) DeleteFollower(ctx context.Context, followerID, followingID uuid.UUID) error {
-	const q = `DELETE FROM followers WHERE follower_id = $1 AND following_id = $2`
-	if _, err := r.db.Exec(ctx, q, followerID, followingID); err != nil {
-		return fmt.Errorf("follower_repo.DeleteFollower: %w", err)
+// MarkUnfollowed aplica un evento users.unfollowed.v1 ocurrido en `at`.
+// No borra la fila: la deja inactiva (tombstone) para que un follow más viejo
+// que llegue después no la reviva. Si el unfollow llega antes que su follow,
+// inserta directamente el tombstone. Retorna false si el evento era viejo.
+func (r *FollowerRepository) MarkUnfollowed(ctx context.Context, followerID, followingID uuid.UUID, at time.Time) (bool, error) {
+	const q = `
+		INSERT INTO followers (follower_id, following_id, active, state_at, last_seen_at, created_at)
+		VALUES ($1, $2, FALSE, $3, NOW(), NOW())
+		ON CONFLICT (follower_id, following_id) DO UPDATE
+		SET active = FALSE, state_at = EXCLUDED.state_at
+		WHERE followers.state_at < EXCLUDED.state_at`
+	tag, err := r.db.Exec(ctx, q, followerID, followingID, at)
+	if err != nil {
+		return false, fmt.Errorf("follower_repo.MarkUnfollowed: %w", err)
 	}
-	return nil
+	return tag.RowsAffected() > 0, nil
 }
 
 // GetActiveFollowers retorna los IDs de seguidores activos de un autor.
@@ -152,6 +166,7 @@ func (r *FollowerRepository) GetActiveFollowers(ctx context.Context, authorID uu
 		SELECT follower_id
 		FROM followers
 		WHERE following_id = $1
+		  AND active
 		  AND last_seen_at > NOW() - INTERVAL '30 days'
 		ORDER BY follower_id
 		LIMIT 10000`
