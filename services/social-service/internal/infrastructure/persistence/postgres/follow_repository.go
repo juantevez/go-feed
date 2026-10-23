@@ -22,6 +22,20 @@ func NewFollowRepository(db *pgxpool.Pool) *FollowRepository {
 	return &FollowRepository{db: db}
 }
 
+// LockPair toma un advisory lock de transacción sobre el par sin importar el
+// orden (a,b) o (b,a), así A→B y B→A simultáneos corren de a uno.
+func (r *FollowRepository) LockPair(ctx context.Context, a, b uuid.UUID) error {
+	lo, hi := a.String(), b.String()
+	if hi < lo {
+		lo, hi = hi, lo
+	}
+	const q = `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`
+	if _, err := outbox.Conn(ctx, r.db).Exec(ctx, q, lo+":"+hi); err != nil {
+		return fmt.Errorf("follow_repo.LockPair: %w", err)
+	}
+	return nil
+}
+
 func (r *FollowRepository) Save(ctx context.Context, f *follow.Follow) error {
 	const q = `
 		INSERT INTO follows (id, follower_id, following_id, mutual, created_at)
@@ -96,8 +110,13 @@ func (r *FollowRepository) GetStats(ctx context.Context, userID uuid.UUID) (*fol
 	return &stats, nil
 }
 
+// UpdateMutual actualiza las dos direcciones del par. Antes tocaba solo
+// followerID → followingID, y la fila del otro lado quedaba desactualizada.
 func (r *FollowRepository) UpdateMutual(ctx context.Context, followerID, followingID uuid.UUID, mutual bool) error {
-	const q = `UPDATE follows SET mutual = $1 WHERE follower_id = $2 AND following_id = $3`
+	const q = `
+		UPDATE follows SET mutual = $1
+		WHERE (follower_id = $2 AND following_id = $3)
+		   OR (follower_id = $3 AND following_id = $2)`
 	_, err := outbox.Conn(ctx, r.db).Exec(ctx, q, mutual, followerID, followingID)
 	if err != nil {
 		return fmt.Errorf("follow_repo.UpdateMutual: %w", err)

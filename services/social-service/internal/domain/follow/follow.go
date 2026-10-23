@@ -12,6 +12,7 @@ var (
 	ErrNotFollowing     = errors.New("not following this user")
 	ErrSelfFollow       = errors.New("cannot follow yourself")
 	ErrFollowNotFound   = errors.New("follow relationship not found")
+	ErrUserNotFound     = errors.New("user not found")
 )
 
 // Follow representa la relación de seguimiento entre dos usuarios.

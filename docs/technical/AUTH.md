@@ -269,6 +269,10 @@ Se publican con **transactional outbox** (`shared/outbox`): el evento se inserta
 JetStream con `Nats-Msg-Id = event_id` (dedupe del lado del stream). Si NATS está caído, la
 operación HTTP igual responde bien y el evento sale cuando NATS vuelve.
 
+Al arrancar crea (si no existen) los streams de eventos de dominio, `AUTH` incluido
+(`streams.Ensure`, ver [SHARED.md](SHARED.md#streams)). Antes no lo hacía: sobre un NATS vacío,
+el relay no podía publicar hasta que content-service o feed-service crearan el stream.
+
 Todos los eventos usan el `events.Envelope` estándar (`event_id`, `event_type`, `version`,
 `timestamp`, `source_service`, `idempotency_key`, `trace_id`, `payload`). El `trace_id` es el
 request ID de chi.
@@ -278,8 +282,8 @@ request ID de chi.
 | `auth.user.registered.v1` | `AUTH` | Registro exitoso | `user_id`, `username`, `email`, `role`, `occured_at` | `register:<user_id>` |
 | `auth.user.logged_in.v1` | `AUTH` | Login exitoso | `user_id`, `occured_at` | — |
 
-Hoy **ningún servicio consume** estos eventos. `shared/events/topics.go` lista como consumidores
-previstos a feed-service y notification-service (registered) y a analytics (logged_in).
+`auth.user.registered.v1` lo consume social-service para su directorio de usuarios (ver
+[SOCIAL.md](SOCIAL.md#directorio-de-usuarios)). `auth.user.logged_in.v1` no lo consume nadie.
 
 Los payloads nunca incluyen el hash de la contraseña ni tokens.
 

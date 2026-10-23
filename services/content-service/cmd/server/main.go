@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -25,6 +24,7 @@ import (
 	s3store "github.com/juantevez/my-ig/content-service/internal/infrastructure/storage/s3"
 	"github.com/juantevez/my-ig/shared/outbox"
 	"github.com/juantevez/my-ig/shared/revocation"
+	"github.com/juantevez/my-ig/shared/streams"
 )
 
 func main() {
@@ -66,7 +66,7 @@ func main() {
 	}
 
 	// ── NATS streams ──────────────────────────────────────────────────────────
-	if err := ensureStreams(js); err != nil {
+	if err := streams.Ensure(js); err != nil {
 		slog.Error("nats ensure streams error", "err", err)
 		os.Exit(1)
 	}
@@ -132,29 +132,6 @@ func main() {
 }
 
 // ── helpers de conexión ───────────────────────────────────────────────────────
-
-func ensureStreams(js nats.JetStreamContext) error {
-	streams := []struct {
-		name     string
-		subjects []string
-	}{
-		{"POSTS", []string{"posts.>"}},
-		{"AUTH", []string{"auth.>"}},
-		{"USERS", []string{"users.>"}},
-	}
-	for _, s := range streams {
-		_, err := js.AddStream(&nats.StreamConfig{
-			Name:     s.name,
-			Subjects: s.subjects,
-			Storage:  nats.FileStorage,
-			MaxAge:   7 * 24 * time.Hour,
-		})
-		if err != nil && !errors.Is(err, nats.ErrStreamNameAlreadyInUse) {
-			return fmt.Errorf("ensure stream %s: %w", s.name, err)
-		}
-	}
-	return nil
-}
 
 func connectDB(cfg configs.DBConfig) (*pgxpool.Pool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.ConnectTimeout)

@@ -407,9 +407,9 @@ Reintentos y DLQ: la misma política de `shared/dlq` que feed-service (3 entrega
 1 s y 5 s, payload inválido directo a la DLQ, aviso de "en proceso" cada 10 s), descripta en
 [FEED.md](FEED.md#reintentos-y-dlq).
 
-Al arrancar crea (si no existen) los streams de los que consume, `USERS` y `POSTS`, con la misma
-configuración que content-service y feed-service (disco, retención 7 días), y `DLQ`. Arranca
-aunque sea el primer servicio en conectarse a un NATS vacío.
+Al arrancar crea (si no existen) los streams de eventos de dominio (`streams.Ensure`, ver
+[SHARED.md](SHARED.md#streams)) y `DLQ`. Arranca aunque sea el primer servicio en conectarse a
+un NATS vacío.
 
 ---
 
@@ -494,9 +494,6 @@ conectaron y restos de código para limpiar.
   usuario).
 - **Retención:** `notifications` crece sin límite.
 - **Tests:** faltan los del consumer y los repositorios (ver [Operación](#operación)).
-- **Streams duplicados:** content-service, feed-service y notification-service declaran cada uno
-  los streams que usan. Si la configuración cambia en uno y no en los otros, el primero que
-  arranca define la del stream. Convendría declararlos una sola vez en `shared/`.
 - **`/ready`** responde `200` siempre.
 - **Restos para limpiar:** el puerto `EventPublisher`, el error `ErrNotOwner` y el método de
   dominio `Notification.MarkRead` no se usan (el repositorio marca con SQL); `LOG_LEVEL` no se

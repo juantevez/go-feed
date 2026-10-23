@@ -10,17 +10,19 @@ import (
 	"github.com/juantevez/my-ig/social-service/internal/application/port/input"
 	"github.com/juantevez/my-ig/social-service/internal/application/port/output"
 	"github.com/juantevez/my-ig/social-service/internal/domain/follow"
+	"github.com/juantevez/my-ig/social-service/internal/domain/user"
 )
 
 // FollowService implementa input.FollowUseCase.
 type FollowService struct {
 	tx        output.TxManager
 	follows   follow.Repository
+	users     user.Repository
 	publisher output.EventPublisher
 }
 
-func NewFollowService(tx output.TxManager, follows follow.Repository, publisher output.EventPublisher) *FollowService {
-	return &FollowService{tx: tx, follows: follows, publisher: publisher}
+func NewFollowService(tx output.TxManager, follows follow.Repository, users user.Repository, publisher output.EventPublisher) *FollowService {
+	return &FollowService{tx: tx, follows: follows, users: users, publisher: publisher}
 }
 
 // Follow crea la relación follower → following.
@@ -33,9 +35,24 @@ func (s *FollowService) Follow(ctx context.Context, cmd input.FollowCommand) err
 		return fmt.Errorf("follow: %w", err)
 	}
 
+	// El seguido tiene que existir. El seguidor no hace falta chequearlo: es el
+	// sub de un token emitido por auth-service.
+	exists, err := s.users.Exists(ctx, cmd.FollowingID)
+	if err != nil {
+		return fmt.Errorf("follow: check user: %w", err)
+	}
+	if !exists {
+		return fmt.Errorf("follow: %w", follow.ErrUserNotFound)
+	}
+
 	traceID := chimiddleware.GetReqID(ctx)
 
 	return s.tx.WithinTx(ctx, func(ctx context.Context) error {
+		// Con el par lockeado, un follow cruzado simultáneo ve esta relación.
+		if err := s.follows.LockPair(ctx, cmd.FollowerID, cmd.FollowingID); err != nil {
+			return fmt.Errorf("follow: lock: %w", err)
+		}
+
 		// Persistir la relación
 		if err := s.follows.Save(ctx, f); err != nil {
 			return fmt.Errorf("follow: save: %w", err)
@@ -67,6 +84,9 @@ func (s *FollowService) Unfollow(ctx context.Context, cmd input.UnfollowCommand)
 	traceID := chimiddleware.GetReqID(ctx)
 
 	return s.tx.WithinTx(ctx, func(ctx context.Context) error {
+		if err := s.follows.LockPair(ctx, cmd.FollowerID, cmd.FollowingID); err != nil {
+			return fmt.Errorf("unfollow: lock: %w", err)
+		}
 		if err := s.follows.Delete(ctx, cmd.FollowerID, cmd.FollowingID); err != nil {
 			return fmt.Errorf("unfollow: %w", err)
 		}

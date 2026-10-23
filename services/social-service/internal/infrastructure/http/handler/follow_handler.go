@@ -56,6 +56,9 @@ func (h *FollowHandler) Follow(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, follow.ErrSelfFollow):
 			slog.Warn("follow: self-follow attempt", "request_id", reqID, "user_id", claims.Sub)
 			respondError(w, http.StatusBadRequest, "cannot follow yourself")
+		case errors.Is(err, follow.ErrUserNotFound):
+			slog.Warn("follow: target user not found", "request_id", reqID, "follower_id", claims.Sub, "target_id", targetID)
+			respondError(w, http.StatusNotFound, "user not found")
 		default:
 			slog.Error("follow: unexpected error", "request_id", reqID, "follower_id", claims.Sub, "target_id", targetID, "err", err)
 			respondError(w, http.StatusInternalServerError, "follow failed")

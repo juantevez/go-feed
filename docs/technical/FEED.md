@@ -352,8 +352,8 @@ feed-service **no publica eventos**. Consume cuatro, cada uno con su durable de 
 | `users.followed.v1` | `USERS` | `feed-service-user-followed` | Activa la relación y hace backfill. |
 | `users.unfollowed.v1` | `USERS` | `feed-service-user-unfollowed` | Desactiva la relación y limpia el feed. |
 
-Al arrancar crea (si no existen) los streams `POSTS`, `AUTH`, `USERS` (disco, retención 7 días) y
-`DLQ` (`dlq.>`, retención 30 días).
+Al arrancar crea (si no existen) los streams de eventos de dominio (`streams.Ensure`, ver
+[SHARED.md](SHARED.md#streams)) y `DLQ` (`dlq.>`, retención 30 días).
 
 ### Reintentos y DLQ
 

@@ -21,6 +21,7 @@ import (
 	"github.com/juantevez/my-ig/auth-service/internal/infrastructure/persistence/postgres"
 	"github.com/juantevez/my-ig/shared/outbox"
 	"github.com/juantevez/my-ig/shared/revocation"
+	"github.com/juantevez/my-ig/shared/streams"
 )
 
 func main() {
@@ -54,6 +55,15 @@ func main() {
 	}
 	defer nc.Close()
 	slog.Info("nats connected")
+
+	// ── NATS streams ──────────────────────────────────────────────────────────
+	// Los de eventos de dominio, declarados en shared/streams. Este servicio
+	// publica en AUTH: sin el stream, el relay no puede publicar y los eventos
+	// quedan en la outbox hasta que otro servicio lo cree.
+	if err := streams.Ensure(js); err != nil {
+		slog.Error("nats ensure streams error", "err", err)
+		os.Exit(1)
+	}
 
 	// ── Adaptadores (driven ports) ───────────────────────────────────────────
 	userRepo := postgres.NewUserRepository(db)

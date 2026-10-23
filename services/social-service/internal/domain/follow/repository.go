@@ -8,6 +8,11 @@ import (
 
 // Repository es el puerto driven para persistencia del grafo social.
 type Repository interface {
+	// LockPair serializa, hasta el fin de la tx, los follow/unfollow entre dos
+	// usuarios (en cualquier dirección). Sin esto, dos follows cruzados
+	// simultáneos no se ven entre sí y ninguno queda mutuo. Requiere una tx.
+	LockPair(ctx context.Context, a, b uuid.UUID) error
+
 	// Save persiste una nueva relación de follow.
 	// Retorna ErrAlreadyFollowing si ya existe.
 	Save(ctx context.Context, f *Follow) error
@@ -28,6 +33,7 @@ type Repository interface {
 	// GetStats retorna follower_count y following_count de un usuario.
 	GetStats(ctx context.Context, userID uuid.UUID) (*Stats, error)
 
-	// UpdateMutual actualiza el flag mutual en ambas direcciones.
+	// UpdateMutual pone el flag mutual en las dos filas del par: followerID →
+	// followingID y followingID → followerID (las que existan).
 	UpdateMutual(ctx context.Context, followerID, followingID uuid.UUID, mutual bool) error
 }

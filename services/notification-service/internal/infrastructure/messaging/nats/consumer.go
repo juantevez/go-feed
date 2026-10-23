@@ -3,15 +3,14 @@ package natsconsumer
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
-	"time"
 
 	"github.com/juantevez/my-ig/notification-service/internal/application/usecase"
 	"github.com/juantevez/my-ig/notification-service/internal/domain/notification"
 	"github.com/juantevez/my-ig/shared/dlq"
 	"github.com/juantevez/my-ig/shared/events"
+	"github.com/juantevez/my-ig/shared/streams"
 	"github.com/nats-io/nats.go"
 )
 
@@ -31,7 +30,9 @@ func (c *Consumer) Subscribe() error {
 	if err := dlq.EnsureStream(c.js); err != nil {
 		return err
 	}
-	if err := ensureStreams(c.js); err != nil {
+	// Los streams de los que consume: así arranca aunque sea el primer servicio
+	// en conectarse a un NATS vacío.
+	if err := streams.Ensure(c.js); err != nil {
 		return err
 	}
 
@@ -118,31 +119,6 @@ func (c *Consumer) handlePostCreated(_ context.Context, msg *nats.Msg) error {
 		"post_id", p.PostID,
 		"author_id", p.AuthorID,
 	)
-	return nil
-}
-
-// ensureStreams crea los streams de los que consume este servicio, si no existen.
-// Sin esto, arrancar antes que content-service o feed-service sobre un NATS vacío
-// hacía fallar la suscripción. Misma configuración que en esos servicios.
-func ensureStreams(js nats.JetStreamContext) error {
-	streams := []struct {
-		name     string
-		subjects []string
-	}{
-		{"POSTS", []string{"posts.>"}},
-		{"USERS", []string{"users.>"}},
-	}
-	for _, s := range streams {
-		_, err := js.AddStream(&nats.StreamConfig{
-			Name:     s.name,
-			Subjects: s.subjects,
-			Storage:  nats.FileStorage,
-			MaxAge:   7 * 24 * time.Hour,
-		})
-		if err != nil && !errors.Is(err, nats.ErrStreamNameAlreadyInUse) {
-			return fmt.Errorf("ensure stream %s: %w", s.name, err)
-		}
-	}
 	return nil
 }
 

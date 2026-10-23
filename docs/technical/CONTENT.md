@@ -455,8 +455,9 @@ con `Nats-Msg-Id = event_id`. Si NATS está caído, la operación HTTP igual res
 evento sale cuando NATS vuelve. El `trace_id` es el request ID de chi (el header `X-Request-Id`
 del cliente si viene, si no uno generado).
 
-Al arrancar, content-service crea (si no existen) los streams `POSTS` (`posts.>`), `AUTH`
-(`auth.>`) y `USERS` (`users.>`), con almacenamiento en disco y retención de 7 días.
+Al arrancar llama a `streams.Ensure`, que crea (si no existen) los streams de eventos de dominio
+`POSTS`, `AUTH` y `USERS`, declarados una sola vez en `shared/streams` (ver
+[SHARED.md](SHARED.md#streams)).
 
 | Tópico | Stream | Cuándo | Payload | `idempotency_key` |
 |---|---|---|---|---|

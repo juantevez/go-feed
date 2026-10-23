@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -22,6 +21,7 @@ import (
 	"github.com/juantevez/my-ig/feed-service/internal/infrastructure/persistence/postgres"
 	"github.com/juantevez/my-ig/shared/outbox"
 	"github.com/juantevez/my-ig/shared/revocation"
+	"github.com/juantevez/my-ig/shared/streams"
 )
 
 func main() {
@@ -62,7 +62,7 @@ func main() {
 	fanOutSvc := usecase.NewFanOutService(txManager, feedRepo)
 
 	// ── NATS streams ─────────────────────────────────────────────────────────
-	if err := ensureStreams(js); err != nil {
+	if err := streams.Ensure(js); err != nil {
 		slog.Error("nats ensure streams error", "err", err)
 		os.Exit(1)
 	}
@@ -136,29 +136,6 @@ func connectDB(cfg configs.DBConfig) (*pgxpool.Pool, error) {
 		return nil, fmt.Errorf("ping db: %w", err)
 	}
 	return pool, nil
-}
-
-func ensureStreams(js nats.JetStreamContext) error {
-	streams := []struct {
-		name     string
-		subjects []string
-	}{
-		{"POSTS", []string{"posts.>"}},
-		{"AUTH", []string{"auth.>"}},
-		{"USERS", []string{"users.>"}},
-	}
-	for _, s := range streams {
-		_, err := js.AddStream(&nats.StreamConfig{
-			Name:     s.name,
-			Subjects: s.subjects,
-			Storage:  nats.FileStorage,
-			MaxAge:   7 * 24 * time.Hour,
-		})
-		if err != nil && !errors.Is(err, nats.ErrStreamNameAlreadyInUse) {
-			return fmt.Errorf("ensure stream %s: %w", s.name, err)
-		}
-	}
-	return nil
 }
 
 func connectNATS(cfg configs.NATSConfig) (nats.JetStreamContext, *nats.Conn, error) {

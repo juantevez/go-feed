@@ -15,10 +15,12 @@ import (
 
 	"github.com/juantevez/my-ig/shared/outbox"
 	"github.com/juantevez/my-ig/shared/revocation"
+	"github.com/juantevez/my-ig/shared/streams"
 	"github.com/juantevez/my-ig/social-service/configs"
 	"github.com/juantevez/my-ig/social-service/internal/application/usecase"
 	"github.com/juantevez/my-ig/social-service/internal/infrastructure/http/handler"
 	"github.com/juantevez/my-ig/social-service/internal/infrastructure/http/router"
+	"github.com/juantevez/my-ig/social-service/internal/infrastructure/messaging/natsconsumer"
 	"github.com/juantevez/my-ig/social-service/internal/infrastructure/persistence/postgres"
 )
 
@@ -49,8 +51,18 @@ func main() {
 	defer nc.Close()
 	slog.Info("nats connected")
 
+	// ── NATS streams ──────────────────────────────────────────────────────────
+	// Los de eventos de dominio, declarados en shared/streams. Este servicio
+	// publica en USERS: sin el stream, el relay no puede publicar y los eventos
+	// quedan en la outbox hasta que otro servicio lo cree.
+	if err := streams.Ensure(js); err != nil {
+		slog.Error("nats ensure streams error", "err", err)
+		os.Exit(1)
+	}
+
 	// ── Adaptadores ───────────────────────────────────────────────────────────
 	followRepo := postgres.NewFollowRepository(db)
+	userRepo := postgres.NewUserRepository(db)
 	txManager := outbox.NewTxManager(db)
 	publisher := outbox.NewPublisher("social-service") // escribe en la tabla outbox, no en NATS
 
@@ -63,7 +75,14 @@ func main() {
 	}()
 
 	// ── Use case ──────────────────────────────────────────────────────────────
-	followSvc := usecase.NewFollowService(txManager, followRepo, publisher)
+	followSvc := usecase.NewFollowService(txManager, followRepo, userRepo, publisher)
+
+	// ── NATS consumer (directorio de usuarios) ────────────────────────────────
+	consumer := natsconsumer.NewConsumer(js, usecase.NewUserService(userRepo))
+	if err := consumer.Subscribe(); err != nil {
+		slog.Error("consumer subscribe error", "err", err)
+		os.Exit(1)
+	}
 
 	// ── HTTP ──────────────────────────────────────────────────────────────────
 	followHandler := handler.NewFollowHandler(followSvc)
