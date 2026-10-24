@@ -9,7 +9,15 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+
+	"github.com/juantevez/my-ig/shared/telemetry"
 )
+
+var tracer = otel.Tracer("github.com/juantevez/my-ig/shared/outbox")
 
 const (
 	defaultPollInterval = 500 * time.Millisecond
@@ -49,7 +57,7 @@ func NewRelay(pool *pgxpool.Pool, js nats.JetStreamContext) *Relay {
 
 // Run procesa la outbox hasta que ctx se cancele.
 func (r *Relay) Run(ctx context.Context) {
-	slog.Info("outbox relay started", "poll_interval", r.pollInterval)
+	slog.InfoContext(ctx, "outbox relay started", "poll_interval", r.pollInterval)
 
 	poll := time.NewTicker(r.pollInterval)
 	defer poll.Stop()
@@ -59,7 +67,7 @@ func (r *Relay) Run(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			slog.Info("outbox relay stopped")
+			slog.InfoContext(ctx, "outbox relay stopped")
 			return
 		case <-poll.C:
 			// Si el batch vino lleno puede haber más pendientes: seguimos sin esperar.
@@ -67,7 +75,7 @@ func (r *Relay) Run(ctx context.Context) {
 				n, err := r.processBatch(ctx)
 				if err != nil {
 					if ctx.Err() == nil {
-						slog.Error("outbox relay: batch failed", "err", err)
+						slog.ErrorContext(ctx, "outbox relay: batch failed", "err", err)
 					}
 					break
 				}
@@ -82,9 +90,10 @@ func (r *Relay) Run(ctx context.Context) {
 }
 
 type pending struct {
-	id      uuid.UUID
-	topic   string
-	payload []byte
+	id           uuid.UUID
+	topic        string
+	payload      []byte
+	traceContext []byte // NULL en eventos de antes de la columna, o sin trace
 }
 
 // processBatch publica hasta batchSize eventos y retorna cuántos publicó.
@@ -96,7 +105,7 @@ func (r *Relay) processBatch(ctx context.Context) (int, error) {
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
 
 	const selectQ = `
-		SELECT id, topic, payload
+		SELECT id, topic, payload, trace_context
 		FROM outbox
 		WHERE published_at IS NULL
 		ORDER BY created_at, id
@@ -110,7 +119,7 @@ func (r *Relay) processBatch(ctx context.Context) (int, error) {
 	var batch []pending
 	for rows.Next() {
 		var p pending
-		if err := rows.Scan(&p.id, &p.topic, &p.payload); err != nil {
+		if err := rows.Scan(&p.id, &p.topic, &p.payload, &p.traceContext); err != nil {
 			rows.Close()
 			return 0, fmt.Errorf("scan pending: %w", err)
 		}
@@ -127,7 +136,7 @@ func (r *Relay) processBatch(ctx context.Context) (int, error) {
 	published := make([]uuid.UUID, 0, len(batch))
 	var publishErr error
 	for _, p := range batch {
-		_, err := r.js.Publish(p.topic, p.payload, nats.MsgId(p.id.String()), nats.Context(ctx))
+		err := r.publish(ctx, p)
 		if err == nil {
 			published = append(published, p.id)
 			continue
@@ -157,15 +166,44 @@ func (r *Relay) processBatch(ctx context.Context) (int, error) {
 	return len(published), nil
 }
 
+// publish manda un evento a JetStream como hijo del trace que lo originó.
+//
+// El span "send" cuelga de la request que escribió el evento, aunque se
+// publique después de que esa request terminó: en Tempo se ve el hueco entre
+// el commit y la publicación, que es justamente el lag del outbox.
+func (r *Relay) publish(ctx context.Context, p pending) error {
+	ctx, span := tracer.Start(telemetry.UnmarshalTraceContext(ctx, p.traceContext), "send "+p.topic,
+		trace.WithSpanKind(trace.SpanKindProducer),
+		trace.WithAttributes(
+			attribute.String("messaging.system", "nats"),
+			attribute.String("messaging.operation.type", "send"),
+			attribute.String("messaging.destination.name", p.topic),
+			attribute.String("messaging.message.id", p.id.String()),
+		),
+	)
+	defer span.End()
+
+	msg := nats.NewMsg(p.topic)
+	msg.Data = p.payload
+	telemetry.InjectNATS(ctx, msg.Header)
+
+	if _, err := r.js.PublishMsg(msg, nats.MsgId(p.id.String()), nats.Context(ctx)); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+	return nil
+}
+
 // cleanup borra eventos ya publicados más viejos que retention.
 func (r *Relay) cleanup(ctx context.Context) {
 	const q = `DELETE FROM outbox WHERE published_at < NOW() - make_interval(secs => $1)`
 	tag, err := r.pool.Exec(ctx, q, r.retention.Seconds())
 	if err != nil {
-		slog.Error("outbox relay: cleanup failed", "err", err)
+		slog.ErrorContext(ctx, "outbox relay: cleanup failed", "err", err)
 		return
 	}
 	if n := tag.RowsAffected(); n > 0 {
-		slog.Info("outbox relay: cleanup", "deleted", n)
+		slog.InfoContext(ctx, "outbox relay: cleanup", "deleted", n)
 	}
 }

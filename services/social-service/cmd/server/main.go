@@ -16,6 +16,7 @@ import (
 	"github.com/juantevez/my-ig/shared/outbox"
 	"github.com/juantevez/my-ig/shared/revocation"
 	"github.com/juantevez/my-ig/shared/streams"
+	"github.com/juantevez/my-ig/shared/telemetry"
 	"github.com/juantevez/my-ig/social-service/configs"
 	"github.com/juantevez/my-ig/social-service/internal/application/usecase"
 	"github.com/juantevez/my-ig/social-service/internal/infrastructure/http/handler"
@@ -25,7 +26,15 @@ import (
 )
 
 func main() {
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
+	slog.SetDefault(slog.New(telemetry.LogHandler(slog.NewJSONHandler(os.Stdout, nil))))
+
+	// ── Telemetría ───────────────────────────────────────────────────────────
+	// Antes del pool y del router: los instrumentadores toman los providers globales.
+	shutdownTelemetry, err := telemetry.Init(context.Background(), "social-service")
+	if err != nil {
+		slog.Error("telemetry init error", "err", err)
+		os.Exit(1)
+	}
 
 	cfg, err := configs.Load()
 	if err != nil {
@@ -97,7 +106,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:         fmt.Sprintf(":%s", cfg.HTTP.Port),
-		Handler:      httpRouter,
+		Handler:      telemetry.HTTPHandler(httpRouter),
 		ReadTimeout:  cfg.HTTP.ReadTimeout,
 		WriteTimeout: cfg.HTTP.WriteTimeout,
 		IdleTimeout:  cfg.HTTP.IdleTimeout,
@@ -124,6 +133,9 @@ func main() {
 	// Después del HTTP: lo pendiente queda en la outbox y se publica al reiniciar.
 	stopRelay()
 	<-relayDone
+	if err := shutdownTelemetry(ctx); err != nil {
+		slog.Error("telemetry shutdown error", "err", err)
+	}
 	slog.Info("server stopped")
 }
 
@@ -136,6 +148,7 @@ func connectDB(cfg configs.DBConfig) (*pgxpool.Pool, error) {
 	}
 	poolCfg.MaxConns = cfg.MaxConns
 	poolCfg.MinConns = cfg.MinConns
+	poolCfg.ConnConfig.Tracer = telemetry.PgxTracer()
 	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
 	if err != nil {
 		return nil, fmt.Errorf("create pool: %w", err)

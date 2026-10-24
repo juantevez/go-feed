@@ -25,7 +25,15 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+
+	"github.com/juantevez/my-ig/shared/telemetry"
 )
+
+var tracer = otel.Tracer("github.com/juantevez/my-ig/shared/dlq")
 
 const (
 	StreamName    = "DLQ"
@@ -115,14 +123,6 @@ func Subscribe(js nats.JetStreamContext, subject, durable string, h Handler) err
 
 func wrap(js nats.JetStreamContext, subject, durable string, h Handler) nats.MsgHandler {
 	return func(msg *nats.Msg) {
-		stop := keepInProgress(msg)
-		err := h(context.Background(), msg)
-		stop()
-		if err == nil {
-			_ = msg.Ack()
-			return
-		}
-
 		var deliveries uint64 = 1
 		var streamSeq uint64
 		if meta, mErr := msg.Metadata(); mErr == nil {
@@ -130,24 +130,49 @@ func wrap(js nats.JetStreamContext, subject, durable string, h Handler) nats.Msg
 			streamSeq = meta.Sequence.Stream
 		}
 
+		// Continúa el trace que trae el mensaje (lo pone el outbox relay). Cada
+		// reentrega es un span "process" más dentro del mismo trace.
+		ctx, span := tracer.Start(telemetry.ExtractNATS(context.Background(), msg.Header), "process "+subject,
+			trace.WithSpanKind(trace.SpanKindConsumer),
+			trace.WithAttributes(
+				attribute.String("messaging.system", "nats"),
+				attribute.String("messaging.operation.type", "process"),
+				attribute.String("messaging.destination.name", msg.Subject),
+				attribute.String("messaging.consumer.group.name", durable),
+				attribute.Int64("messaging.nats.delivery_count", int64(deliveries)),
+			),
+		)
+		defer span.End()
+
+		stop := keepInProgress(msg)
+		err := h(ctx, msg)
+		stop()
+		if err == nil {
+			_ = msg.Ack()
+			return
+		}
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+
 		if !isPermanent(err) && deliveries < MaxAttempts {
 			delay := backoff[min(int(deliveries), len(backoff))-1]
-			slog.Warn("consumer: handler failed, retrying",
+			slog.WarnContext(ctx, "consumer: handler failed, retrying",
 				"subject", subject, "consumer", durable,
 				"delivery", deliveries, "retry_in", delay, "err", err)
 			_ = msg.NakWithDelay(delay)
 			return
 		}
 
-		if pubErr := publish(js, msg, durable, err, deliveries, streamSeq); pubErr != nil {
+		if pubErr := publish(ctx, js, msg, durable, err, deliveries, streamSeq); pubErr != nil {
 			// No hacemos Term: sin DLQ el mensaje se perdería. Se reintenta.
-			slog.Error("consumer: dead-letter publish failed, will retry",
+			slog.ErrorContext(ctx, "consumer: dead-letter publish failed, will retry",
 				"subject", subject, "consumer", durable, "err", pubErr)
 			_ = msg.NakWithDelay(backoff[len(backoff)-1])
 			return
 		}
 
-		slog.Error("consumer: message dead-lettered",
+		span.SetAttributes(attribute.Bool("messaging.dead_lettered", true))
+		slog.ErrorContext(ctx, "consumer: message dead-lettered",
 			"subject", subject, "consumer", durable,
 			"deliveries", deliveries, "permanent", isPermanent(err), "err", err)
 		_ = msg.Term()
@@ -177,7 +202,7 @@ func keepInProgress(msg *nats.Msg) (stop func()) {
 	return func() { close(done) }
 }
 
-func publish(js nats.JetStreamContext, msg *nats.Msg, durable string, cause error, deliveries, streamSeq uint64) error {
+func publish(ctx context.Context, js nats.JetStreamContext, msg *nats.Msg, durable string, cause error, deliveries, streamSeq uint64) error {
 	dl := nats.NewMsg(SubjectPrefix + msg.Subject)
 	dl.Data = msg.Data
 	for k, v := range msg.Header {
@@ -190,6 +215,8 @@ func publish(js nats.JetStreamContext, msg *nats.Msg, durable string, cause erro
 	dl.Header.Set(HeaderDeliveries, strconv.FormatUint(deliveries, 10))
 	dl.Header.Set(HeaderStreamSeq, strconv.FormatUint(streamSeq, 10))
 	dl.Header.Set(HeaderFailedAt, time.Now().UTC().Format(time.RFC3339))
+	// Un replay desde la DLQ sigue colgando del trace en el que falló.
+	telemetry.InjectNATS(ctx, dl.Header)
 
 	_, err := js.PublishMsg(dl)
 	return err
