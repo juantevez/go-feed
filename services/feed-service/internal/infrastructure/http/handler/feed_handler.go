@@ -53,7 +53,7 @@ func (h *FeedHandler) GetFeed(w http.ResponseWriter, r *http.Request) {
 
 	claims, ok := middleware.ClaimsFromContext(r.Context())
 	if !ok {
-		slog.Warn("get_feed: unauthorized", "request_id", reqID)
+		slog.WarnContext(r.Context(), "get_feed: unauthorized", "request_id", reqID)
 		respondError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
@@ -66,13 +66,13 @@ func (h *FeedHandler) GetFeed(w http.ResponseWriter, r *http.Request) {
 	if raw := r.URL.Query().Get("cursor"); raw != "" {
 		cursor, err = parseCursor(raw)
 		if err != nil {
-			slog.Warn("get_feed: invalid cursor", "request_id", reqID, "user_id", userID, "cursor", raw)
+			slog.WarnContext(r.Context(), "get_feed: invalid cursor", "request_id", reqID, "user_id", userID, "cursor", raw)
 			respondError(w, http.StatusBadRequest, "invalid cursor")
 			return
 		}
 	}
 
-	slog.Info("get_feed: request", "request_id", reqID, "user_id", userID, "limit", limit, "has_cursor", cursor != nil)
+	slog.InfoContext(r.Context(), "get_feed: request", "request_id", reqID, "user_id", userID, "limit", limit, "has_cursor", cursor != nil)
 
 	result, err := h.feed.GetFeed(r.Context(), input.GetFeedQuery{
 		UserID: userID,
@@ -81,11 +81,11 @@ func (h *FeedHandler) GetFeed(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		if errors.Is(err, feed.ErrFeedEmpty) {
-			slog.Info("get_feed: empty", "request_id", reqID, "user_id", userID)
+			slog.InfoContext(r.Context(), "get_feed: empty", "request_id", reqID, "user_id", userID)
 			respondJSON(w, http.StatusOK, feedResponse{Entries: []feedEntryResponse{}, HasMore: false})
 			return
 		}
-		slog.Error("get_feed: unexpected error", "request_id", reqID, "user_id", userID, "err", err)
+		slog.ErrorContext(r.Context(), "get_feed: unexpected error", "request_id", reqID, "user_id", userID, "err", err)
 		respondError(w, http.StatusInternalServerError, "failed to get feed")
 		return
 	}
@@ -106,7 +106,7 @@ func (h *FeedHandler) GetFeed(w http.ResponseWriter, r *http.Request) {
 		resp.NextCursor = encodeCursor(result.NextCursor)
 	}
 
-	slog.Info("get_feed: ok", "request_id", reqID, "user_id", userID, "entry_count", len(resp.Entries), "has_more", resp.HasMore)
+	slog.InfoContext(r.Context(), "get_feed: ok", "request_id", reqID, "user_id", userID, "entry_count", len(resp.Entries), "has_more", resp.HasMore)
 	respondJSON(w, http.StatusOK, resp)
 }
 

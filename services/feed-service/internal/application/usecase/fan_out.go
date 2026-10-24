@@ -48,7 +48,7 @@ func (s *FanOutService) FanOut(ctx context.Context, cmd input.FanOutCommand) err
 			return fmt.Errorf("fan_out: check deleted: %w", err)
 		}
 		if deleted {
-			slog.Info("fan_out: post already deleted, skipping", "post_id", cmd.PostID, "author_id", cmd.AuthorID)
+			slog.InfoContext(ctx, "fan_out: post already deleted, skipping", "post_id", cmd.PostID, "author_id", cmd.AuthorID)
 			return nil
 		}
 		return s.fanOut(ctx, cmd)
@@ -66,7 +66,7 @@ func (s *FanOutService) fanOut(ctx context.Context, cmd input.FanOutCommand) err
 	}
 
 	if cmd.Visibility != visibilityPublic {
-		slog.Info("fan_out: non-public post, author feed only",
+		slog.InfoContext(ctx, "fan_out: non-public post, author feed only",
 			"post_id", cmd.PostID, "author_id", cmd.AuthorID, "visibility", cmd.Visibility)
 		return nil
 	}
@@ -82,6 +82,6 @@ func (s *FanOutService) fanOut(ctx context.Context, cmd input.FanOutCommand) err
 		return fmt.Errorf("fan_out: insert for followers: %w", err)
 	}
 
-	slog.Info("fan_out: done", "post_id", cmd.PostID, "author_id", cmd.AuthorID, "follower_entries", n)
+	slog.InfoContext(ctx, "fan_out: done", "post_id", cmd.PostID, "author_id", cmd.AuthorID, "follower_entries", n)
 	return nil
 }

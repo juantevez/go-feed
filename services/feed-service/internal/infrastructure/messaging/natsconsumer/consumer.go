@@ -102,7 +102,7 @@ func (c *Consumer) handlePostCreated(ctx context.Context, msg *nats.Msg) error {
 		return dlq.Permanent(fmt.Errorf("extract post created payload (event_id=%s): %w", envelope.EventID, err))
 	}
 
-	slog.Info("consumer: processing post created",
+	slog.InfoContext(ctx, "consumer: processing post created",
 		"event_id", envelope.EventID,
 		"post_id", cmd.PostID,
 		"author_id", cmd.AuthorID,
@@ -128,7 +128,7 @@ func (c *Consumer) handlePostDeleted(ctx context.Context, msg *nats.Msg) error {
 	}
 	postID := p.PostID
 
-	slog.Info("consumer: invalidating feed for deleted post", "post_id", postID)
+	slog.InfoContext(ctx, "consumer: invalidating feed for deleted post", "post_id", postID)
 
 	// Mismo lock que el fan-out: si el posts.created de este post se está
 	// procesando, esperamos su commit y borramos lo que insertó. El tombstone
@@ -164,7 +164,7 @@ func (c *Consumer) handleUserFollowed(ctx context.Context, msg *nats.Msg) error 
 		return dlq.Permanent(fmt.Errorf("extract user followed payload (event_id=%s): %w", envelope.EventID, err))
 	}
 
-	slog.Info("consumer: saving follower", "follower_id", p.FollowerID, "following_id", p.FollowingID)
+	slog.InfoContext(ctx, "consumer: saving follower", "follower_id", p.FollowerID, "following_id", p.FollowingID)
 
 	// Follow + backfill en la misma tx, por la misma razón que en unfollow:
 	// si el backfill fallara, el reintento vería el follow como stale y lo saltearía.
@@ -175,7 +175,7 @@ func (c *Consumer) handleUserFollowed(ctx context.Context, msg *nats.Msg) error 
 		}
 		if !applied {
 			// Hay un unfollow más nuevo: no cargar sus posts.
-			slog.Info("consumer: stale follow event ignored", "event_id", envelope.EventID,
+			slog.InfoContext(ctx, "consumer: stale follow event ignored", "event_id", envelope.EventID,
 				"follower_id", p.FollowerID, "following_id", p.FollowingID)
 			return nil
 		}
@@ -185,7 +185,7 @@ func (c *Consumer) handleUserFollowed(ctx context.Context, msg *nats.Msg) error 
 		if err != nil {
 			return fmt.Errorf("backfill feed: %w", err)
 		}
-		slog.Info("consumer: feed backfilled", "follower_id", p.FollowerID,
+		slog.InfoContext(ctx, "consumer: feed backfilled", "follower_id", p.FollowerID,
 			"following_id", p.FollowingID, "entries", n)
 		return nil
 	})
@@ -204,7 +204,7 @@ func (c *Consumer) handleUserUnfollowed(ctx context.Context, msg *nats.Msg) erro
 		return dlq.Permanent(fmt.Errorf("extract user unfollowed payload (event_id=%s): %w", envelope.EventID, err))
 	}
 
-	slog.Info("consumer: removing follower", "follower_id", p.FollowerID, "following_id", p.FollowingID)
+	slog.InfoContext(ctx, "consumer: removing follower", "follower_id", p.FollowerID, "following_id", p.FollowingID)
 
 	// Tombstone + limpieza del feed en la misma tx: si el borrado fallara después
 	// de aplicar el tombstone, el reintento vería el evento como stale y nunca
@@ -216,7 +216,7 @@ func (c *Consumer) handleUserUnfollowed(ctx context.Context, msg *nats.Msg) erro
 		}
 		if !applied {
 			// Hay un follow más nuevo: sus posts deben quedar en el feed.
-			slog.Info("consumer: stale unfollow event ignored", "event_id", envelope.EventID,
+			slog.InfoContext(ctx, "consumer: stale unfollow event ignored", "event_id", envelope.EventID,
 				"follower_id", p.FollowerID, "following_id", p.FollowingID)
 			return nil
 		}

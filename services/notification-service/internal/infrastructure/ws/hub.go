@@ -103,7 +103,7 @@ func (h *Hub) Push(_ context.Context, userID uuid.UUID, n *notification.Notifica
 func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request, s Session) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		slog.Error("ws: upgrade failed", "user_id", s.UserID, "err", err)
+		slog.ErrorContext(r.Context(), "ws: upgrade failed", "user_id", s.UserID, "err", err)
 		return
 	}
 

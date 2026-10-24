@@ -30,7 +30,7 @@ func (h *FollowHandler) Follow(w http.ResponseWriter, r *http.Request) {
 
 	claims, ok := middleware.ClaimsFromContext(r.Context())
 	if !ok {
-		slog.Warn("follow: unauthorized", "request_id", reqID)
+		slog.WarnContext(r.Context(), "follow: unauthorized", "request_id", reqID)
 		respondError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
@@ -41,7 +41,7 @@ func (h *FollowHandler) Follow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	slog.Info("follow: attempt", "request_id", reqID, "follower_id", claims.Sub, "target_id", targetID)
+	slog.InfoContext(r.Context(), "follow: attempt", "request_id", reqID, "follower_id", claims.Sub, "target_id", targetID)
 
 	err = h.follows.Follow(r.Context(), input.FollowCommand{
 		FollowerID:  claims.Sub,
@@ -51,22 +51,22 @@ func (h *FollowHandler) Follow(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		switch {
 		case errors.Is(err, follow.ErrAlreadyFollowing):
-			slog.Warn("follow: already following", "request_id", reqID, "follower_id", claims.Sub, "target_id", targetID)
+			slog.WarnContext(r.Context(), "follow: already following", "request_id", reqID, "follower_id", claims.Sub, "target_id", targetID)
 			respondError(w, http.StatusConflict, "already following this user")
 		case errors.Is(err, follow.ErrSelfFollow):
-			slog.Warn("follow: self-follow attempt", "request_id", reqID, "user_id", claims.Sub)
+			slog.WarnContext(r.Context(), "follow: self-follow attempt", "request_id", reqID, "user_id", claims.Sub)
 			respondError(w, http.StatusBadRequest, "cannot follow yourself")
 		case errors.Is(err, follow.ErrUserNotFound):
-			slog.Warn("follow: target user not found", "request_id", reqID, "follower_id", claims.Sub, "target_id", targetID)
+			slog.WarnContext(r.Context(), "follow: target user not found", "request_id", reqID, "follower_id", claims.Sub, "target_id", targetID)
 			respondError(w, http.StatusNotFound, "user not found")
 		default:
-			slog.Error("follow: unexpected error", "request_id", reqID, "follower_id", claims.Sub, "target_id", targetID, "err", err)
+			slog.ErrorContext(r.Context(), "follow: unexpected error", "request_id", reqID, "follower_id", claims.Sub, "target_id", targetID, "err", err)
 			respondError(w, http.StatusInternalServerError, "follow failed")
 		}
 		return
 	}
 
-	slog.Info("follow: ok", "request_id", reqID, "follower_id", claims.Sub, "target_id", targetID)
+	slog.InfoContext(r.Context(), "follow: ok", "request_id", reqID, "follower_id", claims.Sub, "target_id", targetID)
 	respondJSON(w, http.StatusOK, map[string]string{"status": "following"})
 }
 
@@ -76,7 +76,7 @@ func (h *FollowHandler) Unfollow(w http.ResponseWriter, r *http.Request) {
 
 	claims, ok := middleware.ClaimsFromContext(r.Context())
 	if !ok {
-		slog.Warn("unfollow: unauthorized", "request_id", reqID)
+		slog.WarnContext(r.Context(), "unfollow: unauthorized", "request_id", reqID)
 		respondError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
@@ -87,7 +87,7 @@ func (h *FollowHandler) Unfollow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	slog.Info("unfollow: attempt", "request_id", reqID, "follower_id", claims.Sub, "target_id", targetID)
+	slog.InfoContext(r.Context(), "unfollow: attempt", "request_id", reqID, "follower_id", claims.Sub, "target_id", targetID)
 
 	err = h.follows.Unfollow(r.Context(), input.UnfollowCommand{
 		FollowerID:  claims.Sub,
@@ -97,16 +97,16 @@ func (h *FollowHandler) Unfollow(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		switch {
 		case errors.Is(err, follow.ErrNotFollowing):
-			slog.Warn("unfollow: not following", "request_id", reqID, "follower_id", claims.Sub, "target_id", targetID)
+			slog.WarnContext(r.Context(), "unfollow: not following", "request_id", reqID, "follower_id", claims.Sub, "target_id", targetID)
 			respondError(w, http.StatusNotFound, "not following this user")
 		default:
-			slog.Error("unfollow: unexpected error", "request_id", reqID, "follower_id", claims.Sub, "target_id", targetID, "err", err)
+			slog.ErrorContext(r.Context(), "unfollow: unexpected error", "request_id", reqID, "follower_id", claims.Sub, "target_id", targetID, "err", err)
 			respondError(w, http.StatusInternalServerError, "unfollow failed")
 		}
 		return
 	}
 
-	slog.Info("unfollow: ok", "request_id", reqID, "follower_id", claims.Sub, "target_id", targetID)
+	slog.InfoContext(r.Context(), "unfollow: ok", "request_id", reqID, "follower_id", claims.Sub, "target_id", targetID)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -129,12 +129,12 @@ func (h *FollowHandler) GetFollowers(w http.ResponseWriter, r *http.Request) {
 		Offset: offset,
 	})
 	if err != nil {
-		slog.Error("get_followers: unexpected error", "request_id", reqID, "user_id", userID, "err", err)
+		slog.ErrorContext(r.Context(), "get_followers: unexpected error", "request_id", reqID, "user_id", userID, "err", err)
 		respondError(w, http.StatusInternalServerError, "failed to get followers")
 		return
 	}
 
-	slog.Info("get_followers: ok", "request_id", reqID, "user_id", userID, "count", len(result.Follows))
+	slog.InfoContext(r.Context(), "get_followers: ok", "request_id", reqID, "user_id", userID, "count", len(result.Follows))
 	respondJSON(w, http.StatusOK, toFollowListResponse(result.Follows))
 }
 
@@ -157,12 +157,12 @@ func (h *FollowHandler) GetFollowing(w http.ResponseWriter, r *http.Request) {
 		Offset: offset,
 	})
 	if err != nil {
-		slog.Error("get_following: unexpected error", "request_id", reqID, "user_id", userID, "err", err)
+		slog.ErrorContext(r.Context(), "get_following: unexpected error", "request_id", reqID, "user_id", userID, "err", err)
 		respondError(w, http.StatusInternalServerError, "failed to get following")
 		return
 	}
 
-	slog.Info("get_following: ok", "request_id", reqID, "user_id", userID, "count", len(result.Follows))
+	slog.InfoContext(r.Context(), "get_following: ok", "request_id", reqID, "user_id", userID, "count", len(result.Follows))
 	respondJSON(w, http.StatusOK, toFollowListResponse(result.Follows))
 }
 
@@ -178,12 +178,12 @@ func (h *FollowHandler) GetStats(w http.ResponseWriter, r *http.Request) {
 
 	stats, err := h.follows.GetStats(r.Context(), userID)
 	if err != nil {
-		slog.Error("get_stats: unexpected error", "request_id", reqID, "user_id", userID, "err", err)
+		slog.ErrorContext(r.Context(), "get_stats: unexpected error", "request_id", reqID, "user_id", userID, "err", err)
 		respondError(w, http.StatusInternalServerError, "failed to get stats")
 		return
 	}
 
-	slog.Info("get_stats: ok", "request_id", reqID, "user_id", userID, "followers", stats.FollowerCount, "following", stats.FollowingCount)
+	slog.InfoContext(r.Context(), "get_stats: ok", "request_id", reqID, "user_id", userID, "followers", stats.FollowerCount, "following", stats.FollowingCount)
 	respondJSON(w, http.StatusOK, map[string]any{
 		"user_id":         stats.UserID.String(),
 		"follower_count":  stats.FollowerCount,
