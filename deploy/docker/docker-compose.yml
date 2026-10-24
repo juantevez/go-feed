@@ -216,6 +216,10 @@ services:
       JWT_ACCESS_TTL: "15m"
       JWT_REFRESH_TTL: "168h"
       LOG_LEVEL: "info"
+      # Traces a Tempo (repo feed-platform). Vacía en el .env = no exportar.
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT-http://tempo:4318}
+      OTEL_TRACES_SAMPLER: parentbased_traceidratio
+      OTEL_TRACES_SAMPLER_ARG: ${OTEL_TRACES_SAMPLER_ARG:-1.0}
     ports:
       - "8080:8080"
 
@@ -239,6 +243,10 @@ services:
       NATS_URL: "nats://nats:4222"
       JWT_SECRET: ${JWT_SECRET:-changeme_in_production}
       LOG_LEVEL: "info"
+      # Traces a Tempo (repo feed-platform). Vacía en el .env = no exportar.
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT-http://tempo:4318}
+      OTEL_TRACES_SAMPLER: parentbased_traceidratio
+      OTEL_TRACES_SAMPLER_ARG: ${OTEL_TRACES_SAMPLER_ARG:-1.0}
     ports:
       - "8081:8081"
 
@@ -274,6 +282,10 @@ services:
       S3_SECRET_KEY: ${S3_SECRET_KEY:-minioadmin}
       JWT_SECRET: ${JWT_SECRET:-changeme_in_production}
       LOG_LEVEL: "info"
+      # Traces a Tempo (repo feed-platform). Vacía en el .env = no exportar.
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT-http://tempo:4318}
+      OTEL_TRACES_SAMPLER: parentbased_traceidratio
+      OTEL_TRACES_SAMPLER_ARG: ${OTEL_TRACES_SAMPLER_ARG:-1.0}
     ports:
       - "8082:8082"
 
@@ -297,6 +309,10 @@ services:
       NATS_URL: "nats://nats:4222"
       JWT_SECRET: ${JWT_SECRET:-changeme_in_production}
       LOG_LEVEL: "info"
+      # Traces a Tempo (repo feed-platform). Vacía en el .env = no exportar.
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT-http://tempo:4318}
+      OTEL_TRACES_SAMPLER: parentbased_traceidratio
+      OTEL_TRACES_SAMPLER_ARG: ${OTEL_TRACES_SAMPLER_ARG:-1.0}
     ports:
       - "8083:8083"
 
@@ -355,6 +371,10 @@ services:
       NATS_URL: "nats://nats:4222"
       JWT_SECRET: ${JWT_SECRET:-changeme_in_production}
       LOG_LEVEL: "info"
+      # Traces a Tempo (repo feed-platform). Vacía en el .env = no exportar.
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT-http://tempo:4318}
+      OTEL_TRACES_SAMPLER: parentbased_traceidratio
+      OTEL_TRACES_SAMPLER_ARG: ${OTEL_TRACES_SAMPLER_ARG:-1.0}
     ports:
       - "8084:8084"
 

@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/juantevez/my-ig/shared/events"
+	"github.com/juantevez/my-ig/shared/telemetry"
 )
 
 // Publisher escribe eventos en la tabla outbox. Implementa la misma firma que
@@ -37,8 +38,10 @@ func (p *Publisher) Publish(ctx context.Context, topic string, payload any) erro
 		return fmt.Errorf("outbox: marshal %s: %w", topic, err)
 	}
 
-	const q = `INSERT INTO outbox (id, topic, payload) VALUES ($1, $2, $3)`
-	if _, err := tx.Exec(ctx, q, envelope.EventID, topic, data); err != nil {
+	// El trace de la request viaja con el evento: el relay lo pone en los
+	// headers de NATS y el consumer continúa el mismo trace.
+	const q = `INSERT INTO outbox (id, topic, payload, trace_context) VALUES ($1, $2, $3, $4)`
+	if _, err := tx.Exec(ctx, q, envelope.EventID, topic, data, telemetry.MarshalTraceContext(ctx)); err != nil {
 		return fmt.Errorf("outbox: insert %s: %w", topic, err)
 	}
 	return nil

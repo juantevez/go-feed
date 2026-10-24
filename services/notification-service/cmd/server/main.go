@@ -22,10 +22,19 @@ import (
 	"github.com/juantevez/my-ig/notification-service/internal/infrastructure/ws"
 	"github.com/juantevez/my-ig/shared/outbox"
 	"github.com/juantevez/my-ig/shared/revocation"
+	"github.com/juantevez/my-ig/shared/telemetry"
 )
 
 func main() {
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
+	slog.SetDefault(slog.New(telemetry.LogHandler(slog.NewJSONHandler(os.Stdout, nil))))
+
+	// ── Telemetría ───────────────────────────────────────────────────────────
+	// Antes del pool y del router: los instrumentadores toman los providers globales.
+	shutdownTelemetry, err := telemetry.Init(context.Background(), "notification-service")
+	if err != nil {
+		slog.Error("telemetry init error", "err", err)
+		os.Exit(1)
+	}
 
 	cfg, err := configs.Load()
 	if err != nil {
@@ -82,7 +91,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:         fmt.Sprintf(":%s", cfg.HTTP.Port),
-		Handler:      httpRouter,
+		Handler:      telemetry.HTTPHandler(httpRouter),
 		ReadTimeout:  cfg.HTTP.ReadTimeout,
 		WriteTimeout: cfg.HTTP.WriteTimeout,
 		IdleTimeout:  cfg.HTTP.IdleTimeout,
@@ -106,6 +115,9 @@ func main() {
 	if err := srv.Shutdown(ctx); err != nil {
 		slog.Error("forced shutdown", "err", err)
 	}
+	if err := shutdownTelemetry(ctx); err != nil {
+		slog.Error("telemetry shutdown error", "err", err)
+	}
 	slog.Info("server stopped")
 }
 
@@ -118,6 +130,7 @@ func connectDB(cfg configs.DBConfig) (*pgxpool.Pool, error) {
 	}
 	poolCfg.MaxConns = cfg.MaxConns
 	poolCfg.MinConns = cfg.MinConns
+	poolCfg.ConnConfig.Tracer = telemetry.PgxTracer()
 	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
 	if err != nil {
 		return nil, fmt.Errorf("create pool: %w", err)
