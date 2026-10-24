@@ -59,7 +59,7 @@ func (c *Consumer) handleUserRegistered(ctx context.Context, msg *nats.Msg) erro
 	if err := c.users.RegisterUser(ctx, p.UserID, p.Username, p.OccuredAt); err != nil {
 		return fmt.Errorf("register user (user_id=%s): %w", p.UserID, err)
 	}
-	slog.Info("consumer: user registered", "user_id", p.UserID)
+	slog.InfoContext(ctx, "consumer: user registered", "user_id", p.UserID)
 	return nil
 }
 

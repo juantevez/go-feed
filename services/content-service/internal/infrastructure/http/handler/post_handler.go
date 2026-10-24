@@ -45,7 +45,7 @@ func (h *PostHandler) CreatePost(w http.ResponseWriter, r *http.Request) {
 
 	claims, ok := middleware.ClaimsFromContext(r.Context())
 	if !ok {
-		slog.Warn("create_post: unauthorized", "request_id", reqID)
+		slog.WarnContext(r.Context(), "create_post: unauthorized", "request_id", reqID)
 		respondError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
@@ -54,11 +54,11 @@ func (h *PostHandler) CreatePost(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseMultipartForm(maxFormMemory); err != nil {
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
-			slog.Warn("create_post: request too large", "request_id", reqID, "author_id", claims.Sub)
+			slog.WarnContext(r.Context(), "create_post: request too large", "request_id", reqID, "author_id", claims.Sub)
 			respondError(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("request exceeds maximum size of %dMB", maxRequestSize>>20))
 			return
 		}
-		slog.Warn("create_post: invalid multipart form", "request_id", reqID, "author_id", claims.Sub, "err", err)
+		slog.WarnContext(r.Context(), "create_post: invalid multipart form", "request_id", reqID, "author_id", claims.Sub, "err", err)
 		respondError(w, http.StatusBadRequest, "invalid multipart form")
 		return
 	}
@@ -75,7 +75,7 @@ func (h *PostHandler) CreatePost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	slog.Info("create_post: attempt",
+	slog.InfoContext(r.Context(), "create_post: attempt",
 		"request_id", reqID,
 		"author_id", claims.Sub,
 		"visibility", visibility,
@@ -93,29 +93,29 @@ func (h *PostHandler) CreatePost(w http.ResponseWriter, r *http.Request) {
 		var fileErr *media.FileError
 		switch {
 		case errors.Is(err, post.ErrInvalidCaption):
-			slog.Warn("create_post: invalid caption", "request_id", reqID, "author_id", claims.Sub, "err", err)
+			slog.WarnContext(r.Context(), "create_post: invalid caption", "request_id", reqID, "author_id", claims.Sub, "err", err)
 			respondError(w, http.StatusBadRequest, post.ErrInvalidCaption.Error())
 		case errors.Is(err, post.ErrInvalidVisibility):
-			slog.Warn("create_post: invalid visibility", "request_id", reqID, "author_id", claims.Sub, "err", err)
+			slog.WarnContext(r.Context(), "create_post: invalid visibility", "request_id", reqID, "author_id", claims.Sub, "err", err)
 			respondError(w, http.StatusBadRequest, post.ErrInvalidVisibility.Error())
 		case errors.Is(err, post.ErrTooManyMedia):
-			slog.Warn("create_post: too many media files", "request_id", reqID, "author_id", claims.Sub, "file_count", len(files))
+			slog.WarnContext(r.Context(), "create_post: too many media files", "request_id", reqID, "author_id", claims.Sub, "file_count", len(files))
 			respondError(w, http.StatusBadRequest, post.ErrTooManyMedia.Error())
 		case errors.As(err, &fileErr):
-			slog.Warn("create_post: invalid media", "request_id", reqID, "author_id", claims.Sub, "err", err)
+			slog.WarnContext(r.Context(), "create_post: invalid media", "request_id", reqID, "author_id", claims.Sub, "err", err)
 			status := http.StatusBadRequest
 			if errors.Is(fileErr, media.ErrFileTooLarge) {
 				status = http.StatusRequestEntityTooLarge
 			}
 			respondError(w, status, fileErr.Error())
 		default:
-			slog.Error("create_post: unexpected error", "request_id", reqID, "author_id", claims.Sub, "err", err)
+			slog.ErrorContext(r.Context(), "create_post: unexpected error", "request_id", reqID, "author_id", claims.Sub, "err", err)
 			respondError(w, http.StatusInternalServerError, "failed to create post")
 		}
 		return
 	}
 
-	slog.Info("create_post: ok", "request_id", reqID, "post_id", result.Post.ID, "author_id", claims.Sub)
+	slog.InfoContext(r.Context(), "create_post: ok", "request_id", reqID, "post_id", result.Post.ID, "author_id", claims.Sub)
 	respondJSON(w, http.StatusCreated, toPostResponse(result.Post))
 }
 
@@ -142,10 +142,10 @@ func (h *PostHandler) GetPost(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		switch {
 		case errors.Is(err, post.ErrPostNotFound):
-			slog.Warn("get_post: not found", "request_id", reqID, "post_id", postID)
+			slog.WarnContext(r.Context(), "get_post: not found", "request_id", reqID, "post_id", postID)
 			respondError(w, http.StatusNotFound, "post not found")
 		default:
-			slog.Error("get_post: unexpected error", "request_id", reqID, "post_id", postID, "err", err)
+			slog.ErrorContext(r.Context(), "get_post: unexpected error", "request_id", reqID, "post_id", postID, "err", err)
 			respondError(w, http.StatusInternalServerError, "failed to get post")
 		}
 		return
@@ -181,7 +181,7 @@ func (h *PostHandler) ListUserPosts(w http.ResponseWriter, r *http.Request) {
 		Offset:         offset,
 	})
 	if err != nil {
-		slog.Error("list_user_posts: unexpected error", "request_id", reqID, "author_id", authorID, "err", err)
+		slog.ErrorContext(r.Context(), "list_user_posts: unexpected error", "request_id", reqID, "author_id", authorID, "err", err)
 		respondError(w, http.StatusInternalServerError, "failed to list posts")
 		return
 	}
@@ -191,7 +191,7 @@ func (h *PostHandler) ListUserPosts(w http.ResponseWriter, r *http.Request) {
 		resp = append(resp, toPostResponse(p))
 	}
 
-	slog.Info("list_user_posts: ok", "request_id", reqID, "author_id", authorID, "count", len(resp))
+	slog.InfoContext(r.Context(), "list_user_posts: ok", "request_id", reqID, "author_id", authorID, "count", len(resp))
 	respondJSON(w, http.StatusOK, resp)
 }
 
@@ -202,7 +202,7 @@ func (h *PostHandler) DeletePost(w http.ResponseWriter, r *http.Request) {
 
 	claims, ok := middleware.ClaimsFromContext(r.Context())
 	if !ok {
-		slog.Warn("delete_post: unauthorized", "request_id", reqID)
+		slog.WarnContext(r.Context(), "delete_post: unauthorized", "request_id", reqID)
 		respondError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
@@ -213,7 +213,7 @@ func (h *PostHandler) DeletePost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	slog.Info("delete_post: attempt", "request_id", reqID, "post_id", postID, "author_id", claims.Sub)
+	slog.InfoContext(r.Context(), "delete_post: attempt", "request_id", reqID, "post_id", postID, "author_id", claims.Sub)
 
 	err = h.posts.DeletePost(r.Context(), input.DeletePostCommand{
 		PostID:   postID,
@@ -224,22 +224,22 @@ func (h *PostHandler) DeletePost(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		switch {
 		case errors.Is(err, post.ErrPostNotFound):
-			slog.Warn("delete_post: not found", "request_id", reqID, "post_id", postID)
+			slog.WarnContext(r.Context(), "delete_post: not found", "request_id", reqID, "post_id", postID)
 			respondError(w, http.StatusNotFound, "post not found")
 		case errors.Is(err, post.ErrNotAuthor):
-			slog.Warn("delete_post: forbidden", "request_id", reqID, "post_id", postID, "author_id", claims.Sub)
+			slog.WarnContext(r.Context(), "delete_post: forbidden", "request_id", reqID, "post_id", postID, "author_id", claims.Sub)
 			respondError(w, http.StatusForbidden, "not authorized to delete this post")
 		case errors.Is(err, post.ErrAlreadyDeleted):
-			slog.Warn("delete_post: already deleted", "request_id", reqID, "post_id", postID)
+			slog.WarnContext(r.Context(), "delete_post: already deleted", "request_id", reqID, "post_id", postID)
 			respondError(w, http.StatusGone, "post already deleted")
 		default:
-			slog.Error("delete_post: unexpected error", "request_id", reqID, "post_id", postID, "err", err)
+			slog.ErrorContext(r.Context(), "delete_post: unexpected error", "request_id", reqID, "post_id", postID, "err", err)
 			respondError(w, http.StatusInternalServerError, "failed to delete post")
 		}
 		return
 	}
 
-	slog.Info("delete_post: ok", "request_id", reqID, "post_id", postID, "author_id", claims.Sub)
+	slog.InfoContext(r.Context(), "delete_post: ok", "request_id", reqID, "post_id", postID, "author_id", claims.Sub)
 	w.WriteHeader(http.StatusNoContent)
 }
 

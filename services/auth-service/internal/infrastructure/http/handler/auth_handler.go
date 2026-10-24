@@ -36,7 +36,7 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 
 	var req registerRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		slog.Warn("register: invalid body", "request_id", reqID, "err", err)
+		slog.WarnContext(r.Context(), "register: invalid body", "request_id", reqID, "err", err)
 		respondError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -49,7 +49,7 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	slog.Info("register: attempt", "request_id", reqID, "email", req.Email, "username", req.Username)
+	slog.InfoContext(r.Context(), "register: attempt", "request_id", reqID, "email", req.Email, "username", req.Username)
 
 	result, err := h.auth.Register(r.Context(), input.RegisterCommand{
 		Username: req.Username,
@@ -60,19 +60,19 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 		var invalid *user.ValidationError
 		switch {
 		case errors.As(err, &invalid):
-			slog.Warn("register: invalid input", "request_id", reqID, "field", invalid.Field, "err", invalid.Msg)
+			slog.WarnContext(r.Context(), "register: invalid input", "request_id", reqID, "field", invalid.Field, "err", invalid.Msg)
 			respondError(w, http.StatusBadRequest, invalid.Msg)
 		case errors.Is(err, user.ErrEmailAlreadyTaken):
-			slog.Warn("register: email already taken", "request_id", reqID, "email", req.Email)
+			slog.WarnContext(r.Context(), "register: email already taken", "request_id", reqID, "email", req.Email)
 			respondError(w, http.StatusConflict, "email already registered")
 		default:
-			slog.Error("register: unexpected error", "request_id", reqID, "email", req.Email, "err", err)
+			slog.ErrorContext(r.Context(), "register: unexpected error", "request_id", reqID, "email", req.Email, "err", err)
 			respondError(w, http.StatusInternalServerError, "registration failed")
 		}
 		return
 	}
 
-	slog.Info("register: ok", "request_id", reqID, "user_id", result.UserID)
+	slog.InfoContext(r.Context(), "register: ok", "request_id", reqID, "user_id", result.UserID)
 	respondJSON(w, http.StatusCreated, map[string]string{"user_id": result.UserID.String()})
 }
 
@@ -89,7 +89,7 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 
 	var req loginRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		slog.Warn("login: invalid body", "request_id", reqID, "err", err)
+		slog.WarnContext(r.Context(), "login: invalid body", "request_id", reqID, "err", err)
 		respondError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -98,7 +98,7 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	slog.Info("login: attempt", "request_id", reqID, "email", req.Email)
+	slog.InfoContext(r.Context(), "login: attempt", "request_id", reqID, "email", req.Email)
 
 	result, err := h.auth.Login(r.Context(), input.LoginCommand{
 		Email:    req.Email,
@@ -107,16 +107,16 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		switch {
 		case errors.Is(err, user.ErrInvalidCredentials):
-			slog.Warn("login: invalid credentials", "request_id", reqID, "email", req.Email)
+			slog.WarnContext(r.Context(), "login: invalid credentials", "request_id", reqID, "email", req.Email)
 			respondError(w, http.StatusUnauthorized, "invalid credentials")
 		default:
-			slog.Error("login: unexpected error", "request_id", reqID, "email", req.Email, "err", err)
+			slog.ErrorContext(r.Context(), "login: unexpected error", "request_id", reqID, "email", req.Email, "err", err)
 			respondError(w, http.StatusInternalServerError, "login failed")
 		}
 		return
 	}
 
-	slog.Info("login: ok", "request_id", reqID, "email", req.Email)
+	slog.InfoContext(r.Context(), "login: ok", "request_id", reqID, "email", req.Email)
 	respondJSON(w, http.StatusOK, map[string]string{
 		"access_token":  result.AccessToken,
 		"refresh_token": result.RefreshToken,
@@ -135,7 +135,7 @@ func (h *AuthHandler) Refresh(w http.ResponseWriter, r *http.Request) {
 
 	var req refreshRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		slog.Warn("refresh: invalid body", "request_id", reqID, "err", err)
+		slog.WarnContext(r.Context(), "refresh: invalid body", "request_id", reqID, "err", err)
 		respondError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -150,16 +150,16 @@ func (h *AuthHandler) Refresh(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		switch {
 		case errors.Is(err, token.ErrTokenExpired), errors.Is(err, token.ErrTokenInvalid):
-			slog.Warn("refresh: invalid or expired token", "request_id", reqID)
+			slog.WarnContext(r.Context(), "refresh: invalid or expired token", "request_id", reqID)
 			respondError(w, http.StatusUnauthorized, "invalid or expired refresh token")
 		default:
-			slog.Error("refresh: unexpected error", "request_id", reqID, "err", err)
+			slog.ErrorContext(r.Context(), "refresh: unexpected error", "request_id", reqID, "err", err)
 			respondError(w, http.StatusInternalServerError, "refresh failed")
 		}
 		return
 	}
 
-	slog.Info("refresh: ok", "request_id", reqID)
+	slog.InfoContext(r.Context(), "refresh: ok", "request_id", reqID)
 	respondJSON(w, http.StatusOK, map[string]string{
 		"access_token":  result.AccessToken,
 		"refresh_token": result.RefreshToken,
@@ -177,19 +177,19 @@ func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 
 	claims, ok := middleware.ClaimsFromContext(r.Context())
 	if !ok || claims.JTI == "" {
-		slog.Warn("logout: missing or invalid token", "request_id", reqID)
+		slog.WarnContext(r.Context(), "logout: missing or invalid token", "request_id", reqID)
 		respondError(w, http.StatusUnauthorized, "missing or invalid token")
 		return
 	}
 	jti := claims.JTI
 
 	if err := h.auth.Logout(r.Context(), input.LogoutCommand{JTI: jti, ExpiresAt: claims.ExpiresAt}); err != nil {
-		slog.Error("logout: failed", "request_id", reqID, "jti", jti, "err", err)
+		slog.ErrorContext(r.Context(), "logout: failed", "request_id", reqID, "jti", jti, "err", err)
 		respondError(w, http.StatusInternalServerError, "logout failed")
 		return
 	}
 
-	slog.Info("logout: ok", "request_id", reqID, "jti", jti)
+	slog.InfoContext(r.Context(), "logout: ok", "request_id", reqID, "jti", jti)
 	w.WriteHeader(http.StatusNoContent)
 }
 

@@ -82,7 +82,7 @@ func (s *NotificationService) NotifyNewFollower(ctx context.Context, n *notifica
 			return fmt.Errorf("apply follow: %w", err)
 		}
 		if !applied {
-			slog.Info("notify_new_follower: stale or duplicate follow ignored",
+			slog.InfoContext(ctx, "notify_new_follower: stale or duplicate follow ignored",
 				"event_id", n.EventID, "target_user_id", n.TargetUserID, "follower_id", n.SourceUserID)
 			return nil
 		}
@@ -116,7 +116,7 @@ func (s *NotificationService) RemoveNewFollower(ctx context.Context, followerID,
 			return fmt.Errorf("apply unfollow: %w", err)
 		}
 		if !applied {
-			slog.Info("remove_new_follower: stale or duplicate unfollow ignored",
+			slog.InfoContext(ctx, "remove_new_follower: stale or duplicate unfollow ignored",
 				"target_user_id", followingID, "follower_id", followerID)
 			return nil
 		}
@@ -124,7 +124,7 @@ func (s *NotificationService) RemoveNewFollower(ctx context.Context, followerID,
 		if err != nil {
 			return fmt.Errorf("delete: %w", err)
 		}
-		slog.Info("remove_new_follower: done", "target_user_id", followingID, "follower_id", followerID, "deleted", n)
+		slog.InfoContext(ctx, "remove_new_follower: done", "target_user_id", followingID, "follower_id", followerID, "deleted", n)
 		return nil
 	})
 	if err != nil {
